@@ -106,10 +106,19 @@ def get_all_tasks() -> List[Dict]:
                             if status_select:
                                 status = status_select.get("name", "Not set")
                         
+                        # Due Date
+                        due_date = "No date"
+                        due_prop = props.get("Due Date", {})
+                        if due_prop:
+                            date_obj = due_prop.get("date", {})
+                            if date_obj:
+                                due_date = date_obj.get("start", "No date")
+                        
                         task = {
                             "task_name": task_name,
                             "owners": owners,
                             "status": status,
+                            "due_date": due_date,
                             "department": dept
                         }
                         all_tasks.append(task)
@@ -125,20 +134,45 @@ def get_all_tasks() -> List[Dict]:
     
     return all_tasks
 
-# SMART person detection - works for ANY name
+# SUPER FLEXIBLE person search - finds ANY format!
 def find_person_tasks(tasks: List[Dict], query: str) -> List[Dict]:
     person_tasks = []
+    query_lower = query.lower()
     
     for task in tasks:
         if task.get("owners"):
             for owner in task["owners"]:
-                if owner and query.lower() in owner.lower():
-                    person_tasks.append(task)
-                    break
+                if owner:
+                    owner_lower = owner.lower()
+                    
+                    # MULTIPLE SEARCH STRATEGIES:
+                    # 1. Exact match (Brazil = Brazil)
+                    # 2. Partial match (Brazil = Brazil Silva)
+                    # 3. First name match (Brazil = Brazil)
+                    # 4. Email match (Brazil = brazil@company.com)
+                    # 5. Any word match (Brazil = Mr. Brazil Consultant)
+                    
+                    if (query_lower == owner_lower or  # Exact match
+                        query_lower in owner_lower or  # Partial match
+                        any(word == query_lower for word in owner_lower.split()) or  # Word match
+                        query_lower in owner_lower.replace('.', '').replace('@', '')):  # Email/name variants
+                        
+                        person_tasks.append(task)
+                        break
     
     return person_tasks
 
-# Process ANY command
+# Get all unique owner names for debugging
+def get_all_owner_names(tasks: List[Dict]) -> List[str]:
+    all_names = set()
+    for task in tasks:
+        if task.get("owners"):
+            for owner in task["owners"]:
+                if owner:
+                    all_names.add(owner)
+    return sorted(list(all_names))
+
+# Process commands with FLEXIBLE search
 def process_slack_command(command_text: str) -> str:
     tasks = get_all_tasks()
     
@@ -148,7 +182,7 @@ def process_slack_command(command_text: str) -> str:
     command_lower = command_text.lower()
     
     # AI-powered response if available
-    if openai_client and len(command_text) > 5:  # Use AI for substantial queries
+    if openai_client and len(command_text) > 5:
         try:
             tasks_text = "\n".join([f"- {t['task_name']} ({t['status']})" for t in tasks[:8]])
             
@@ -169,26 +203,39 @@ def process_slack_command(command_text: str) -> str:
             logger.error(f"OpenAI error: {e}")
             # Fall through to basic response
     
-    # Person query - works for ANY name
-    if any(word in command_lower for word in ['what', 'who', 'working', 'task', 'omar', 'sarah', 'deema', 'brazil']):
-        # Extract person name from query
-        possible_names = ['omar', 'sarah', 'deema', 'brazil']  # Add more names as needed
-        found_person = None
+    # PERSON QUERY - SUPER FLEXIBLE
+    if any(word in command_lower for word in ['what', 'who', 'working', 'task']):
+        # Try to extract person name using multiple strategies
+        possible_names = ['brazil', 'omar', 'sarah', 'deema']  # Add more as needed
         
+        found_person = None
         for name in possible_names:
             if name in command_lower:
                 found_person = name
                 break
         
+        # If no specific name found, try to extract from query
+        if not found_person and len(command_lower) > 10:
+            words = command_lower.split()
+            for word in words:
+                if len(word) > 3 and word not in ['what', 'who', 'working', 'tasks', 'about']:
+                    found_person = word
+                    break
+        
         if found_person:
             person_tasks = find_person_tasks(tasks, found_person)
+            all_owners = get_all_owner_names(tasks)
+            
             if person_tasks:
                 response = f"👤 *{found_person.title()}'s Tasks:*\n\n"
                 for task in person_tasks:
-                    response += f"• {task['task_name']} ({task['status']})\n"
-                return response + f"\n📊 Total: {len(tasks)} tasks across company"
+                    owners_str = ", ".join(task["owners"]) if task["owners"] else "Unassigned"
+                    response += f"• {task['task_name']} ({task['status']}) - Due: {task['due_date']}\n"
+                return response + f"\n📊 Found {len(person_tasks)} tasks for {found_person.title()}"
             else:
-                return f"🤔 No tasks found for {found_person.title()}. Found {len(tasks)} tasks total."
+                # Helpful debug info
+                return (f"🤔 No tasks found for '{found_person}'. " 
+                       f"But I found {len(tasks)} tasks total with owners like: {', '.join(all_owners[:5])}...")
     
     # Brief/overview
     elif any(word in command_lower for word in ['brief', 'overview', 'summary', 'status']):
@@ -201,17 +248,21 @@ def process_slack_command(command_text: str) -> str:
         for dept, count in dept_counts.items():
             response += f"• {dept.title()}: {count} tasks\n"
         
-        return response + f"\n💡 Try '/intel what [name]' for specific people"
+        all_owners = get_all_owner_names(tasks)
+        response += f"\n👥 People with tasks: {', '.join(all_owners[:8])}"
+        
+        return response
     
     # Help/default
     else:
-        return "🤖 *Task Intel Bot* - Available Commands:\n\n" + \
-               "• `/intel what [name]` - Tasks for any person\n" + \
-               "• `/intel brief` - Company overview\n" + \
-               "• `/intel [any question]` - Natural language\n\n" + \
-               f"📊 Currently tracking {len(tasks)} tasks across {len(set(t['department'] for t in tasks))} departments"
+        all_owners = get_all_owner_names(tasks)
+        return ("🤖 *Task Intel Bot* - Available Commands:\n\n" + 
+               "• `/intel what [name]` - Tasks for any person\n" + 
+               "• `/intel brief` - Company overview\n" + 
+               "• `/intel [any question]` - Natural language\n\n" + 
+               f"📊 Tracking {len(tasks)} tasks | 👥 {len(all_owners)} people: {', '.join(all_owners[:6])}...")
 
-# Slack endpoints
+# Slack endpoints (same as before)
 @app.post("/slack/events")
 async def slack_events(request: Request):
     try:
@@ -259,15 +310,17 @@ async def slack_command(request: Request):
 @app.get("/health")
 async def health_check():
     tasks = get_all_tasks()
+    all_owners = get_all_owner_names(tasks)
     return {
         "status": "healthy",
         "tasks_found": len(tasks),
-        "message": f"Ready - {len(tasks)} tasks found" if tasks else "No tasks found"
+        "people_found": len(all_owners),
+        "message": f"Ready - {len(tasks)} tasks, {len(all_owners)} people"
     }
 
 @app.get("/")
 async def home():
-    return {"message": "Task Intel Bot - Company Wide"}
+    return {"message": "Task Intel Bot - Flexible Search"}
 
 if __name__ == "__main__":
     import uvicorn
