@@ -61,8 +61,8 @@ def get_tasks_from_notion(database_id: str) -> List[Dict]:
                 "task_name": get_property_text(props.get("Task Name", {})),
                 "owner": get_property_people(props.get("Owner", {})),
                 "status": get_property_select(props.get("Status", {})),
-                "due_date": get_property_date(props.get("Due Date", {})),
-                "next_step": get_property_text(props.get("Next Step", {})),
+                "due_date": get_property_date(props.get("Due Date", {})),  # FIXED: "Due Date"
+                "next_step": get_property_text(props.get("Next steps", {})),  # FIXED: "Next steps"
                 "blocker": get_property_select(props.get("Blocker", {})),
                 "impact": get_property_text(props.get("Impact", {})),
                 "priority": get_property_select(props.get("Priority", {})),
@@ -75,13 +75,23 @@ def get_tasks_from_notion(database_id: str) -> List[Dict]:
 
 # Notion property helpers
 def get_property_text(prop: Dict) -> str:
-    return " ".join([text.get("plain_text", "") for text in prop.get("rich_text", [])])
+    title_text = prop.get("title", [])
+    if title_text:
+        return " ".join([text.get("plain_text", "") for text in title_text])
+    
+    rich_text = prop.get("rich_text", [])
+    if rich_text:
+        return " ".join([text.get("plain_text", "") for text in rich_text])
+    
+    return "Not specified"
 
 def get_property_people(prop: Dict) -> List[str]:
-    return [person.get("name", "Unknown") for person in prop.get("people", [])]
+    people = prop.get("people", [])
+    return [person.get("name", "Unknown") for person in people]
 
 def get_property_select(prop: Dict) -> str:
-    return prop.get("select", {}).get("name", "Not set")
+    select = prop.get("select", {})
+    return select.get("name", "Not set")
 
 def get_property_date(prop: Dict) -> str:
     date_obj = prop.get("date")
@@ -100,30 +110,37 @@ def process_slack_command(command_text: str) -> str:
     
     # If no real data, use demo fallback
     if not all_tasks:
-        return "🤖 *Task Intel Bot* - Real data coming soon! Currently setting up Notion connection."
+        return "🤖 *Task Intel Bot* - No tasks found in Notion. Please check your database setup."
     
     # Person query
     if 'what' in command_text or 'working' in command_text:
         for task in all_tasks:
             owners = [owner.lower() for owner in task.get("owner", [])]
-            if any(owner in command_text for owner in ['omar', 'sarah', 'deema', 'brazil']):
-                response = f"*{task['owner'][0] if task['owner'] else 'Unassigned'}'s Tasks:*\n\n"
-                response += f"• *{task['task_name']}* ({task['status']})\n"
-                response += f"  Next: {task['next_step'] or 'Not specified'}\n"
-                response += f"  Due: {task['due_date']} | Blocker: {task['blocker']}\n"
-                response += f"  Impact: {task['impact'] or 'Not specified'}\n"
-                return response
-        return "I found tasks but couldn't match that person. Try: Check your Notion data."
+            query_owners = ['omar', 'sarah', 'deema', 'brazil']
+            if any(query_owner in command_text for query_owner in query_owners):
+                if any(query_owner in owners for query_owner in query_owners):
+                    owner_name = task['owner'][0] if task['owner'] else 'Unassigned'
+                    response = f"*{owner_name}'s Tasks:*\n\n"
+                    response += f"• *{task['task_name'] or 'Unnamed Task'}* ({task['status']})\n"
+                    response += f"  Next: {task['next_step'] or 'Not specified'}\n"
+                    response += f"  Due: {task['due_date']} | Blocker: {task['blocker']}\n"
+                    response += f"  Impact: {task['impact'] or 'Not specified'}\n"
+                    return response
+        return f"I found {len(all_tasks)} tasks but couldn't match that person. Try: Omar, Sarah, Deema, or Brazil"
     
     # Team/brief queries
     elif 'team' in command_text or 'brief' in command_text:
         response = f"*Real Task Data - {datetime.now().strftime('%d %b %Y')}*\n\n"
         response += f"*Found {len(all_tasks)} tasks across all departments:*\n\n"
         
-        for i, task in enumerate(all_tasks[:5], 1):  # Show first 5 tasks
+        for i, task in enumerate(all_tasks[:5], 1):
             owner = task['owner'][0] if task['owner'] else 'Unassigned'
-            response += f"{i}. *{owner}* → {task['task_name']}\n"
+            task_name = task['task_name'] or 'Unnamed Task'
+            response += f"{i}. *{owner}* → {task_name}\n"
             response += f"   Status: {task['status']} | Due: {task['due_date']}\n\n"
+        
+        if len(all_tasks) > 5:
+            response += f"... and {len(all_tasks) - 5} more tasks"
         
         return response
     
@@ -133,7 +150,7 @@ def process_slack_command(command_text: str) -> str:
                "• `/intel what [person]` - Real tasks from Notion\n" + \
                "• `/intel team` - Department overview\n" + \
                "• `/intel brief` - Company brief\n\n" + \
-               "*Status:* Connected to Notion ✅"
+               f"*Status:* Connected to Notion | Found {len(all_tasks)} tasks ✅"
 
 # Slack endpoints
 @app.post("/slack/events")
