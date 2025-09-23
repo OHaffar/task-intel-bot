@@ -14,7 +14,72 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Task Intel Bot")
 
-# Simple storage for demo - we'll replace with real Notion later
+# Slack signature verification
+def verify_slack_signature(request: Request, body: bytes) -> bool:
+    slack_signing_secret = os.getenv('SLACK_SIGNING_SECRET', '')
+    if not slack_signing_secret:
+        return True  # Skip verification if secret not set yet
+    
+    timestamp = request.headers.get('X-Slack-Request-Timestamp', '')
+    slack_signature = request.headers.get('X-Slack-Signature', '')
+    
+    # Prevent replay attacks
+    if abs(time.time() - float(timestamp)) > 60 * 5:
+        return False
+    
+    sig_basestring = f"v0:{timestamp}:".encode() + body
+    my_signature = 'v0=' + hmac.new(
+        slack_signing_secret.encode(),
+        sig_basestring,
+        hashlib.sha256
+    ).hexdigest()
+    
+    return hmac.compare_digest(my_signature, slack_signature)
+
+# Slack events endpoint
+@app.post("/slack/events")
+async def slack_events(request: Request):
+    try:
+        body = await request.body()
+        
+        # Verify Slack signature
+        if not verify_slack_signature(request, body):
+            raise HTTPException(status_code=401, detail="Invalid signature")
+        
+        data = await request.json()
+        
+        # Slack URL verification challenge
+        if "challenge" in data:
+            return JSONResponse(content={"challenge": data["challenge"]})
+        
+        # Handle actual events later
+        return JSONResponse(content={"status": "ok"})
+        
+    except Exception as e:
+        logger.error(f"Slack events error: {e}")
+        return JSONResponse(content={"status": "error"})
+
+# Slack command endpoint
+@app.post("/slack/command")
+async def slack_command(request: Request):
+    try:
+        body = await request.body()
+        
+        # Verify Slack signature
+        if not verify_slack_signature(request, body):
+            raise HTTPException(status_code=401, detail="Invalid signature")
+        
+        # Simple response for now
+        return JSONResponse(content={
+            "response_type": "in_channel",
+            "text": "🤖 Task Intel Bot is working! I'll be smarter soon!"
+        })
+        
+    except Exception as e:
+        logger.error(f"Slack command error: {e}")
+        return JSONResponse(content={"text": "Sorry, I encountered an error."})
+
+# Demo data and other endpoints remain the same...
 demo_tasks = [
     {
         "owner": ["Omar"],
@@ -25,26 +90,6 @@ demo_tasks = [
         "blocker": "None",
         "impact": "Improves user experience and conversion rates",
         "priority": "P1"
-    },
-    {
-        "owner": ["Sarah"],
-        "task_name": "Database Migration",
-        "status": "Blocked",
-        "due_date": "2025-09-18",
-        "next_step": "Wait for vendor API access",
-        "blocker": "Major",
-        "impact": "Essential for scaling customer data storage",
-        "priority": "P0"
-    },
-    {
-        "owner": ["Deema"],
-        "task_name": "Social Media Campaign",
-        "status": "To-Do",
-        "due_date": "2025-09-25",
-        "next_step": "Create content calendar",
-        "blocker": "None",
-        "impact": "Increases brand awareness and engagement",
-        "priority": "P2"
     }
 ]
 
@@ -78,53 +123,6 @@ async def what_query(owner: str):
     except Exception as e:
         logger.error(f"Error in /what: {e}")
         return {"response": f"Sorry, couldn't find tasks for {owner}", "status": "error"}
-
-@app.get("/team")
-async def team_query(team: str):
-    """Team brief - currently using demo data"""
-    try:
-        # For demo, return all tasks as if they're from the requested team
-        response = f"# {team.title()} Brief - {datetime.now().strftime('%d %b %Y')}\n\n"
-        response += "## Top Risks\n"
-        response += "• Sarah → Database Migration (Major blocker) • Due: 18 Sep 2025\n\n"
-        response += "## People Likely to Slip\n"
-        response += "• Sarah → Database Migration (vendor delay)\n\n"
-        response += "## Quick Wins\n"
-        response += "• Omar → Website Redesign (ready for design review)\n\n"
-        response += "## Team Snapshot\n"
-        response += "To-Do: 1 • In-Progress: 1 • Blocked: 1 • Done: 0\n\n"
-        response += "## Notable Changes\n"
-        response += "• Omar updated Website Redesign today"
-        
-        return {"response": response, "status": "success"}
-    
-    except Exception as e:
-        logger.error(f"Error in /team: {e}")
-        return {"response": f"Sorry, couldn't generate {team} brief", "status": "error"}
-
-@app.get("/brief")
-async def brief_query():
-    """Company brief - currently using demo data"""
-    try:
-        response = f"# Company Brief - {datetime.now().strftime('%d %b %Y')}\n\n"
-        response += "## Top Risks\n"
-        response += "• Sarah → Database Migration (Major blocker) • Due: 18 Sep 2025\n\n"
-        response += "## People Likely to Slip\n"
-        response += "• Sarah → Database Migration (waiting on vendor)\n\n"
-        response += "## Quick Wins\n"
-        response += "• Omar → Website Redesign (design phase almost complete)\n"
-        response += "• Deema → Social Media Campaign (ready to start)\n\n"
-        response += "## Team Snapshot\n"
-        response += "Total: 3 • To-Do: 1 • In-Progress: 1 • Blocked: 1 • Done: 0\n\n"
-        response += "## Notable Changes\n"
-        response += "• Omar updated Website Redesign status\n"
-        response += "• Sarah reported vendor delay for Database Migration"
-        
-        return {"response": response, "status": "success"}
-    
-    except Exception as e:
-        logger.error(f"Error in /brief: {e}")
-        return {"response": "Sorry, couldn't generate company brief", "status": "error"}
 
 if __name__ == "__main__":
     import uvicorn
