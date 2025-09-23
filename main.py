@@ -27,13 +27,6 @@ if os.getenv('NOTION_TOKEN'):
     except Exception as e:
         logger.error(f"Notion client error: {e}")
 
-if os.getenv('OPENAI_API_KEY'):
-    try:
-        openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-        logger.info("✅ OpenAI client connected")
-    except Exception as e:
-        logger.error(f"OpenAI error: {e}")
-
 # Slack signature verification
 def verify_slack_signature(request: Request, body: bytes) -> bool:
     slack_signing_secret = os.getenv('SLACK_SIGNING_SECRET', '')
@@ -55,7 +48,62 @@ def verify_slack_signature(request: Request, body: bytes) -> bool:
     
     return hmac.compare_digest(my_signature, slack_signature)
 
-# Get tasks from Notion
+# DEBUG: See what's actually in the database
+def debug_database_contents():
+    if not notion:
+        return "Notion not connected"
+    
+    try:
+        databases = {
+            'ops': os.getenv('NOTION_DB_OPS'),
+            'tech': os.getenv('NOTION_DB_TECH'),
+            'comm': os.getenv('NOTION_DB_COMM'),
+            'fin': os.getenv('NOTION_DB_FIN')
+        }
+        
+        debug_info = []
+        
+        for dept, db_id in databases.items():
+            if not db_id:
+                continue
+                
+            try:
+                response = notion.databases.query(database_id=db_id)
+                tasks_in_dept = []
+                
+                for page in response.get("results", []):
+                    props = page.get("properties", {})
+                    
+                    # Task name
+                    task_name = "Unnamed"
+                    title_prop = props.get("Task Name", {})
+                    if title_prop:
+                        title_text = title_prop.get("title", [])
+                        if title_text:
+                            task_name = title_text[0].get("plain_text", "Unnamed")[:30]
+                    
+                    # Check if Owner field exists and has data
+                    owner_prop = props.get("Owner", {})
+                    has_owner_field = bool(owner_prop)
+                    owner_count = len(owner_prop.get("people", [])) if owner_prop else 0
+                    
+                    tasks_in_dept.append({
+                        "name": task_name,
+                        "has_owner_field": has_owner_field,
+                        "owner_count": owner_count
+                    })
+                
+                debug_info.append(f"{dept}: {len(tasks_in_dept)} tasks, {sum(t['owner_count'] for t in tasks_in_dept)} owners")
+                
+            except Exception as e:
+                debug_info.append(f"{dept}: ERROR - {str(e)}")
+        
+        return " | ".join(debug_info)
+        
+    except Exception as e:
+        return f"DEBUG ERROR: {str(e)}"
+
+# Simple task getter for now
 def get_all_tasks() -> List[Dict]:
     if not notion:
         return []
@@ -78,54 +126,32 @@ def get_all_tasks() -> List[Dict]:
                 response = notion.databases.query(database_id=db_id)
                 
                 for page in response.get("results", []):
-                    try:
-                        props = page.get("properties", {})
-                        
-                        # Task name
-                        task_name = "Unnamed Task"
-                        title_prop = props.get("Task Name", {})
-                        if title_prop:
-                            title_text = title_prop.get("title", [])
-                            if title_text:
-                                task_name = title_text[0].get("plain_text", "Unnamed Task")
-                        
-                        # Owners
-                        owners = []
-                        owner_prop = props.get("Owner", {})
-                        if owner_prop:
-                            people = owner_prop.get("people", [])
-                            for person in people:
-                                if person and person.get("name"):
-                                    owners.append(person.get("name"))
-                        
-                        # Status
-                        status = "Not set"
-                        status_prop = props.get("Status", {})
-                        if status_prop:
-                            status_select = status_prop.get("select", {})
-                            if status_select:
-                                status = status_select.get("name", "Not set")
-                        
-                        # Due Date
-                        due_date = "No date"
-                        due_prop = props.get("Due Date", {})
-                        if due_prop:
-                            date_obj = due_prop.get("date", {})
-                            if date_obj:
-                                due_date = date_obj.get("start", "No date")
-                        
-                        task = {
-                            "task_name": task_name,
-                            "owners": owners,
-                            "status": status,
-                            "due_date": due_date,
-                            "department": dept
-                        }
-                        all_tasks.append(task)
-                        
-                    except Exception as e:
-                        continue
-                        
+                    props = page.get("properties", {})
+                    
+                    # Task name
+                    task_name = "Unnamed Task"
+                    title_prop = props.get("Task Name", {})
+                    if title_prop:
+                        title_text = title_prop.get("title", [])
+                        if title_text:
+                            task_name = title_text[0].get("plain_text", "Unnamed Task")
+                    
+                    # Owners
+                    owners = []
+                    owner_prop = props.get("Owner", {})
+                    if owner_prop:
+                        people = owner_prop.get("people", [])
+                        for person in people:
+                            if person and person.get("name"):
+                                owners.append(person.get("name"))
+                    
+                    task = {
+                        "task_name": task_name,
+                        "owners": owners,
+                        "department": dept
+                    }
+                    all_tasks.append(task)
+                    
             except Exception as e:
                 continue
                 
@@ -134,135 +160,33 @@ def get_all_tasks() -> List[Dict]:
     
     return all_tasks
 
-# SUPER FLEXIBLE person search - finds ANY format!
-def find_person_tasks(tasks: List[Dict], query: str) -> List[Dict]:
-    person_tasks = []
-    query_lower = query.lower()
-    
-    for task in tasks:
-        if task.get("owners"):
-            for owner in task["owners"]:
-                if owner:
-                    owner_lower = owner.lower()
-                    
-                    # MULTIPLE SEARCH STRATEGIES:
-                    # 1. Exact match (Brazil = Brazil)
-                    # 2. Partial match (Brazil = Brazil Silva)
-                    # 3. First name match (Brazil = Brazil)
-                    # 4. Email match (Brazil = brazil@company.com)
-                    # 5. Any word match (Brazil = Mr. Brazil Consultant)
-                    
-                    if (query_lower == owner_lower or  # Exact match
-                        query_lower in owner_lower or  # Partial match
-                        any(word == query_lower for word in owner_lower.split()) or  # Word match
-                        query_lower in owner_lower.replace('.', '').replace('@', '')):  # Email/name variants
-                        
-                        person_tasks.append(task)
-                        break
-    
-    return person_tasks
-
-# Get all unique owner names for debugging
-def get_all_owner_names(tasks: List[Dict]) -> List[str]:
-    all_names = set()
-    for task in tasks:
-        if task.get("owners"):
-            for owner in task["owners"]:
-                if owner:
-                    all_names.add(owner)
-    return sorted(list(all_names))
-
-# Process commands with FLEXIBLE search
+# Process commands with DEBUG info
 def process_slack_command(command_text: str) -> str:
     tasks = get_all_tasks()
+    debug_info = debug_database_contents()
     
-    if not tasks:
-        return "📊 No tasks found. Check your Notion database setup."
+    # DEBUG RESPONSE - show what's actually happening
+    response = f"🔍 *DEBUG MODE* 🔍\n\n"
+    response += f"**Database Info:** {debug_info}\n\n"
+    response += f"**Tasks Found:** {len(tasks)}\n"
     
-    command_lower = command_text.lower()
+    # Count tasks with owners
+    tasks_with_owners = [t for t in tasks if t.get('owners')]
+    response += f"**Tasks with Owners:** {len(tasks_with_owners)}\n\n"
     
-    # AI-powered response if available
-    if openai_client and len(command_text) > 5:
-        try:
-            tasks_text = "\n".join([f"- {t['task_name']} ({t['status']})" for t in tasks[:8]])
-            
-            response = openai_client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a helpful task assistant. Be concise and professional."},
-                    {"role": "user", "content": f"Query: {command_text}\nAvailable tasks: {tasks_text}\nResponse:"}
-                ],
-                max_tokens=300,
-                temperature=0.3
-            )
-            
-            ai_response = response.choices[0].message.content
-            return f"{ai_response}\n\n📈 Based on {len(tasks)} tasks in Notion"
-            
-        except Exception as e:
-            logger.error(f"OpenAI error: {e}")
-            # Fall through to basic response
+    # Show sample of what we found
+    if tasks:
+        response += "**Sample Tasks:**\n"
+        for i, task in enumerate(tasks[:3]):
+            owners = task.get('owners', [])
+            response += f"{i+1}. {task['task_name'][:40]}... | Owners: {len(owners)} | Dept: {task['department']}\n"
     
-    # PERSON QUERY - SUPER FLEXIBLE
-    if any(word in command_lower for word in ['what', 'who', 'working', 'task']):
-        # Try to extract person name using multiple strategies
-        possible_names = ['brazil', 'omar', 'sarah', 'deema']  # Add more as needed
-        
-        found_person = None
-        for name in possible_names:
-            if name in command_lower:
-                found_person = name
-                break
-        
-        # If no specific name found, try to extract from query
-        if not found_person and len(command_lower) > 10:
-            words = command_lower.split()
-            for word in words:
-                if len(word) > 3 and word not in ['what', 'who', 'working', 'tasks', 'about']:
-                    found_person = word
-                    break
-        
-        if found_person:
-            person_tasks = find_person_tasks(tasks, found_person)
-            all_owners = get_all_owner_names(tasks)
-            
-            if person_tasks:
-                response = f"👤 *{found_person.title()}'s Tasks:*\n\n"
-                for task in person_tasks:
-                    owners_str = ", ".join(task["owners"]) if task["owners"] else "Unassigned"
-                    response += f"• {task['task_name']} ({task['status']}) - Due: {task['due_date']}\n"
-                return response + f"\n📊 Found {len(person_tasks)} tasks for {found_person.title()}"
-            else:
-                # Helpful debug info
-                return (f"🤔 No tasks found for '{found_person}'. " 
-                       f"But I found {len(tasks)} tasks total with owners like: {', '.join(all_owners[:5])}...")
+    response += f"\n💡 **Issue:** The Owner field might be empty in your Notion database."
+    response += f"\n🔧 **Fix:** Assign people to the 'Owner' field in Notion tasks."
     
-    # Brief/overview
-    elif any(word in command_lower for word in ['brief', 'overview', 'summary', 'status']):
-        dept_counts = {}
-        for task in tasks:
-            dept = task.get('department', 'unknown')
-            dept_counts[dept] = dept_counts.get(dept, 0) + 1
-        
-        response = f"🏢 *Company Brief* ({len(tasks)} total tasks)\n\n"
-        for dept, count in dept_counts.items():
-            response += f"• {dept.title()}: {count} tasks\n"
-        
-        all_owners = get_all_owner_names(tasks)
-        response += f"\n👥 People with tasks: {', '.join(all_owners[:8])}"
-        
-        return response
-    
-    # Help/default
-    else:
-        all_owners = get_all_owner_names(tasks)
-        return ("🤖 *Task Intel Bot* - Available Commands:\n\n" + 
-               "• `/intel what [name]` - Tasks for any person\n" + 
-               "• `/intel brief` - Company overview\n" + 
-               "• `/intel [any question]` - Natural language\n\n" + 
-               f"📊 Tracking {len(tasks)} tasks | 👥 {len(all_owners)} people: {', '.join(all_owners[:6])}...")
+    return response
 
-# Slack endpoints (same as before)
+# Slack endpoints
 @app.post("/slack/events")
 async def slack_events(request: Request):
     try:
@@ -290,9 +214,6 @@ async def slack_command(request: Request):
         form_data = await request.form()
         command_text = form_data.get("text", "").strip()
         
-        if not command_text:
-            command_text = "help"
-            
         response_text = process_slack_command(command_text)
         
         return JSONResponse(content={
@@ -303,24 +224,23 @@ async def slack_command(request: Request):
     except Exception as e:
         logger.error(f"Slack command error: {e}")
         return JSONResponse(content={
-            "text": "⚡ Task Intel Bot - Use /intel what [name] or /intel brief"
+            "text": "⚡ Debug mode error"
         })
 
 # Health check
 @app.get("/health")
 async def health_check():
     tasks = get_all_tasks()
-    all_owners = get_all_owner_names(tasks)
+    debug_info = debug_database_contents()
     return {
         "status": "healthy",
         "tasks_found": len(tasks),
-        "people_found": len(all_owners),
-        "message": f"Ready - {len(tasks)} tasks, {len(all_owners)} people"
+        "debug_info": debug_info
     }
 
 @app.get("/")
 async def home():
-    return {"message": "Task Intel Bot - Flexible Search"}
+    return {"message": "Task Intel Bot - Debug Mode"}
 
 if __name__ == "__main__":
     import uvicorn
