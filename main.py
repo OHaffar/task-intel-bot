@@ -92,7 +92,7 @@ def get_all_tasks() -> List[Dict]:
                         "owners": owners,
                         "status": props.get("Status", {}).get("select", {}).get("name", "Not set"),
                         "due_date": props.get("Due Date", {}).get("date", {}).get("start", "No due date"),
-                        "next_step": props.get("Next steps", {}).get("rich_text", [{}])[0].get("plain_text", "Not specified"),
+                        "next_step": props.get("Next Steps", {}).get("rich_text", [{}])[0].get("plain_text", "Not specified"),
                         "blocker": props.get("Blocker", {}).get("select", {}).get("name", "None"),
                         "impact": props.get("Impact", {}).get("rich_text", [{}])[0].get("plain_text", "Not specified"),
                         "priority": props.get("Priority", {}).get("select", {}).get("name", "Not set"),
