@@ -26,8 +26,16 @@ DATABASES = {
     'Finance': os.getenv('NOTION_DB_FIN', '')
 }
 
-# Team member keywords for flexible matching
-TEAM_KEYWORDS = ['omar', 'derrick', 'bhavya', 'nishanth', 'chethan', 'deema', 'brazil']
+# Team member names for natural conversation
+TEAM_MEMBERS = {
+    'omar': 'Omar',
+    'derrick': 'Derrick', 
+    'bhavya': 'Bhavya',
+    'nishanth': 'Nishanth',
+    'chethan': 'Chethan',
+    'deema': 'Deema',
+    'brazil': 'Brazil'
+}
 
 # Initialize Notion client
 notion = None
@@ -42,152 +50,111 @@ except Exception as e:
 
 @app.get("/")
 async def home():
-    return {"status": "ready", "service": "Task Intel Bot"}
+    return {"status": "ready", "service": "Conversational Task Intel"}
 
 @app.get("/health")
 async def health_check():
     return {
         "status": "healthy", 
         "timestamp": datetime.utcnow().isoformat(),
-        "team": TEAM_KEYWORDS
+        "mode": "conversational"
     }
 
-@app.get("/debug/tasks")
-async def debug_tasks():
-    """Debug endpoint to see actual tasks and all columns"""
-    try:
-        tasks = await get_all_tasks()
-        return {
-            "total_tasks": len(tasks),
-            "sample_task": tasks[0] if tasks else "No tasks found"
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-async def analyze_query_smart(query: str) -> Dict:
-    """Flexible query analysis - understands natural language"""
+async def understand_ceo_query(query: str) -> Dict:
+    """Understand what the CEO/COO is asking in natural language"""
     if not query:
-        return {"intent": "brief"}
+        return {"intent": "company_update", "tone": "confident"}
     
     query_lower = query.lower()
     
-    # Check for team members first
-    for person in TEAM_KEYWORDS:
-        if person in query_lower:
-            return {"intent": "person_query", "person_name": person.title()}
+    # Check if asking about a specific person
+    for person_key, person_name in TEAM_MEMBERS.items():
+        if person_key in query_lower:
+            return {
+                "intent": "person_update", 
+                "person": person_name,
+                "tone": "supportive"
+            }
     
-    # Check for status queries
-    if any(word in query_lower for word in ['progress', 'working on', 'in progress']):
-        return {"intent": "status_query", "status": "In progress"}
-    elif any(word in query_lower for word in ['todo', 'to do', 'upcoming']):
-        return {"intent": "status_query", "status": "To Do"}
-    elif any(word in query_lower for word in ['done', 'complete', 'finished']):
-        return {"intent": "status_query", "status": "Done"}
+    # Check for specific types of updates
+    if any(word in query_lower for word in ['how are we', 'how things', 'company', 'brief', 'overview']):
+        return {"intent": "company_update", "tone": "confident"}
     
-    # Check for priority queries
-    if any(word in query_lower for word in ['high priority', 'important', 'critical', 'high']):
-        return {"intent": "priority_query", "priority": "High"}
-    elif any(word in query_lower for word in ['medium priority', 'medium']):
-        return {"intent": "priority_query", "priority": "Medium"}
-    elif any(word in query_lower for word in ['low priority', 'low']):
-        return {"intent": "priority_query", "priority": "Low"}
+    if any(word in query_lower for word in ['block', 'stuck', 'issue', 'problem']):
+        return {"intent": "blockers_update", "tone": "concerned"}
     
-    # Check for blocker queries
-    if any(word in query_lower for word in ['blocked', 'blocker', 'stuck', 'major']):
-        return {"intent": "blocker_query", "blocker": "Major"}
-    elif any(word in query_lower for word in ['minor blocker', 'minor']):
-        return {"intent": "blocker_query", "blocker": "Minor"}
+    if any(word in query_lower for word in ['priority', 'important', 'critical']):
+        return {"intent": "priorities_update", "tone": "focused"}
     
-    # Check for departments
-    if any(word in query_lower for word in ['tech', 'engineering']):
-        return {"intent": "department_query", "department": "Tech"}
-    elif any(word in query_lower for word in ['commercial', 'sales']):
-        return {"intent": "department_query", "department": "Commercial"}
-    elif any(word in query_lower for word in ['operations', 'ops']):
-        return {"intent": "department_query", "department": "Operations"}
-    elif any(word in query_lower for word in ['finance']):
-        return {"intent": "department_query", "department": "Finance"}
+    if any(word in query_lower for word in ['tech', 'engineering', 'commercial', 'operations', 'finance']):
+        dept = next((d for d in ['tech', 'commercial', 'operations', 'finance'] if d in query_lower), 'company')
+        return {"intent": "department_update", "department": dept.title(), "tone": "informative"}
     
-    # Check for overview/brief
-    if any(word in query_lower for word in ['brief', 'overview', 'company', 'status']):
-        return {"intent": "brief"}
-    
-    # Help
-    if any(word in query_lower for word in ['help', 'how to']):
-        return {"intent": "help"}
-    
-    return {"intent": "brief"}
+    # Default to company update
+    return {"intent": "company_update", "tone": "confident"}
 
-async def fetch_notion_database(db_id: str, dept: str) -> List[Dict]:
-    """Fetch tasks from a Notion database"""
-    if not notion or not db_id:
-        return []
+async def get_all_tasks() -> List[Dict]:
+    """Get all tasks with caching"""
+    cache_key = "all_tasks"
+    if cache_key in cache:
+        return cache[cache_key]
     
-    try:
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: notion.databases.query(database_id=db_id, page_size=100)
-        )
-        
-        tasks = []
-        for page in result.get('results', []):
-            task = parse_notion_page(page, dept)
-            if task:
-                tasks.append(task)
-        
+    tasks = []
+    if not notion:
         return tasks
-        
-    except Exception as e:
-        logger.error(f"Error fetching {dept}: {e}")
-        return []
+    
+    # Fetch all databases
+    for dept, db_id in DATABASES.items():
+        if db_id:
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: notion.databases.query(database_id=db_id, page_size=100)
+                )
+                
+                for page in result.get('results', []):
+                    task = parse_task_naturally(page, dept)
+                    if task:
+                        tasks.append(task)
+                        
+            except Exception as e:
+                logger.error(f"Error fetching {dept}: {e}")
+    
+    cache[cache_key] = tasks
+    return tasks
 
-def parse_notion_page(page: Dict, department: str) -> Optional[Dict]:
-    """Parse Notion page - handles all 8 columns correctly"""
+def parse_task_naturally(page: Dict, department: str) -> Optional[Dict]:
+    """Parse task in a way that enables natural conversation"""
     try:
         props = page.get('properties', {})
-        owners = []
         
-        # Resolve user IDs to names for Owner column
+        # Get task name
+        name = get_property(props, 'Task Name', 'title')
+        if not name or name == 'No name':
+            return None
+        
+        # Get owner (simplified - show whatever Notion provides)
+        owners = []
         people_data = props.get('Owner', {}).get('people', [])
         for person in people_data:
-            user_id = person.get('id')
-            if user_id:
-                try:
-                    user_info = notion.users.retrieve(user_id=user_id)
-                    actual_name = user_info.get('name')
-                    if actual_name:
-                        # Match against team keywords
-                        name_lower = actual_name.lower()
-                        for team_member in TEAM_KEYWORDS:
-                            if team_member in name_lower:
-                                owners.append(team_member.title())
-                                break
-                        else:
-                            owners.append(actual_name)
-                except:
-                    owners.append(f"user_{user_id[-6:]}")
+            name = person.get('name') or f"user_{person.get('id', '')[-6:]}"
+            owners.append(name)
         
         due_date_raw = props.get('Due Date', {}).get('date', {}).get('start')
         
-        # Extract all 8 columns according to your Notion setup
-        task = {
-            'name': get_property(props, 'Task Name', 'title'),
+        return {
+            'name': name,
             'owners': owners,
             'status': get_property(props, 'Status', 'select'),
-            'due_date': due_date_raw.split('T')[0] if due_date_raw else 'No date',
+            'due_date': due_date_raw.split('T')[0] if due_date_raw else 'Not scheduled',
             'next_step': get_property(props, 'Next Steps', 'rich_text'),
             'blocker': get_property(props, 'Blocker', 'select'),
             'impact': get_property(props, 'Impact', 'rich_text'),
             'priority': get_property(props, 'Priority', 'select'),
             'department': department,
-            'due_date_raw': due_date_raw,
         }
         
-        if task['name'] and task['name'] != 'No name':
-            return task
-        return None
-        
     except Exception as e:
-        logger.error(f"Error parsing page: {e}")
+        logger.error(f"Error parsing task: {e}")
         return None
 
 def get_property(props, field_name: str, field_type: str) -> str:
@@ -209,59 +176,147 @@ def get_property(props, field_name: str, field_type: str) -> str:
     
     return ''
 
-async def get_all_tasks() -> List[Dict]:
-    """Get all tasks with caching"""
-    cache_key = "all_tasks"
-    if cache_key in cache:
-        return cache[cache_key]
+def generate_conversational_response(tasks: List[Dict], analysis: Dict, original_query: str) -> str:
+    """Generate a human-like response instead of robot columns"""
+    intent = analysis['intent']
+    tone = analysis.get('tone', 'neutral')
     
-    tasks = []
-    if not notion:
-        return tasks
+    if intent == 'person_update':
+        person = analysis['person']
+        person_tasks = [t for t in tasks if any(person.lower() in owner.lower() for owner in t['owners'])]
+        
+        if not person_tasks:
+            return f"👤 *{person}* doesn't have any tasks assigned right now. They might be focusing on ad-hoc work or their tasks are completed."
+        
+        # Group by status for natural reporting
+        in_progress = [t for t in person_tasks if t['status'] == 'In progress']
+        todo = [t for t in person_tasks if t['status'] == 'To Do']
+        done = [t for t in person_tasks if t['status'] == 'Done']
+        
+        response = f"👤 *Here's what {person} is working on:*\n\n"
+        
+        if in_progress:
+            response += f"*In Progress ({len(in_progress)}):*\n"
+            for task in in_progress[:3]:
+                response += f"• {task['name']}"
+                if task['due_date'] != 'Not scheduled':
+                    response += f" (due {task['due_date']})"
+                if task['blocker'] not in ['None', 'Not set']:
+                    response += f" - ⚠️ {task['blocker']} blocker"
+                response += "\n"
+            response += "\n"
+        
+        if todo:
+            response += f"*Up Next ({len(todo)}):*\n"
+            for task in todo[:2]:
+                response += f"• {task['name']}"
+                if task['due_date'] != 'Not scheduled':
+                    response += f" (starts {task['due_date']})"
+                response += "\n"
+            response += "\n"
+        
+        response += f"{person} has {len(person_tasks)} total tasks across {len(set(t['department'] for t in person_tasks))} departments."
+        return response
     
-    # Fetch all databases in parallel
-    fetch_tasks = []
-    for dept, db_id in DATABASES.items():
-        if db_id:
-            fetch_tasks.append(fetch_notion_database(db_id, dept))
+    elif intent == 'company_update':
+        total_tasks = len(tasks)
+        in_progress = len([t for t in tasks if t['status'] == 'In progress'])
+        blocked = len([t for t in tasks if t['blocker'] not in ['None', 'Not set']])
+        
+        response = "🏢 *Company Update*\n\n"
+        response += f"We have *{total_tasks} active tasks* across the company.\n\n"
+        
+        response += f"• *{in_progress} in progress* right now\n"
+        response += f"• *{blocked} currently blocked* and need attention\n"
+        response += f"• *{len([t for t in tasks if t['priority'] == 'High'])} high-priority items*\n\n"
+        
+        # Mention any critical blockers
+        major_blockers = [t for t in tasks if t['blocker'] == 'Major']
+        if major_blockers:
+            response += "🚨 *Critical items needing attention:*\n"
+            for task in major_blockers[:2]:
+                response += f"• {task['name']} ({task['department']})\n"
+        
+        return response
     
-    if fetch_tasks:
-        results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
-        for result in results:
-            if isinstance(result, list):
-                tasks.extend(result)
+    elif intent == 'blockers_update':
+        blocked_tasks = [t for t in tasks if t['blocker'] not in ['None', 'Not set']]
+        
+        if not blocked_tasks:
+            return "✅ *No major blockers right now!* Everything seems to be moving smoothly across all departments."
+        
+        response = "⚠️ *Here are the current blockers:*\n\n"
+        
+        major_blockers = [t for t in blocked_tasks if t['blocker'] == 'Major']
+        minor_blockers = [t for t in blocked_tasks if t['blocker'] == 'Minor']
+        
+        if major_blockers:
+            response += "🚨 *Major Blockers:*\n"
+            for task in major_blockers[:3]:
+                owners = ', '.join(task['owners']) if task['owners'] else 'Unassigned'
+                response += f"• {task['name']} ({owners}) - {task['department']}\n"
+            response += "\n"
+        
+        if minor_blockers:
+            response += "🔸 *Minor Issues:*\n"
+            for task in minor_blockers[:2]:
+                response += f"• {task['name']} - {task['department']}\n"
+        
+        return response
     
-    cache[cache_key] = tasks
-    return tasks
-
-async def send_slack_response(response_url: str, payload: Dict):
-    """Send delayed response to Slack"""
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(response_url, json=payload) as resp:
-                if resp.status != 200:
-                    logger.error(f"Slack response failed: {await resp.text()}")
-    except Exception as e:
-        logger.error(f"Failed to send to Slack: {e}")
+    elif intent == 'priorities_update':
+        high_priority = [t for t in tasks if t['priority'] == 'High']
+        
+        if not high_priority:
+            return "📋 *No high-priority tasks right now.* The team is focused on regular work items."
+        
+        response = "🎯 *High-Priority Focus Items:*\n\n"
+        
+        for i, task in enumerate(high_priority[:5], 1):
+            owners = ', '.join(task['owners']) if task['owners'] else 'Unassigned'
+            response += f"*{i}. {task['name']}*\n"
+            response += f"   {owners} | {task['department']} | Due: {task['due_date']}\n"
+            
+            if task['blocker'] not in ['None', 'Not set']:
+                response += f"   ⚠️ {task['blocker']} blocker\n"
+            
+            response += "\n"
+        
+        return response
+    
+    else:  # department_update or fallback
+        dept = analysis.get('department', 'All')
+        dept_tasks = [t for t in tasks if t['department'] == dept] if dept != 'All' else tasks
+        
+        response = f"📊 *{dept} Department Update*\n\n"
+        response += f"*{len(dept_tasks)} active tasks* in progress.\n\n"
+        
+        status_counts = {}
+        for task in dept_tasks:
+            status_counts[task['status']] = status_counts.get(task['status'], 0) + 1
+        
+        for status, count in status_counts.items():
+            response += f"• {status}: {count} tasks\n"
+        
+        return response
 
 @app.post("/slack/command")
 async def slack_command(request: Request, background_tasks: BackgroundTasks):
-    """Handle Slack commands"""
+    """Handle Slack commands with conversational responses"""
     try:
         form_data = await request.form()
         query = form_data.get("text", "").strip()
         response_url = form_data.get("response_url")
         
         # Immediate response
-        analysis = await analyze_query_smart(query)
         immediate_response = {
             "response_type": "ephemeral",
-            "text": "🤖 Gathering your task information..."
+            "text": "💭 Let me check on that for you..."
         }
         
         # Process in background
         if response_url:
-            background_tasks.add_task(process_query_background, query, analysis, response_url)
+            background_tasks.add_task(process_conversational_query, query, response_url)
         
         return JSONResponse(content=immediate_response)
         
@@ -269,145 +324,41 @@ async def slack_command(request: Request, background_tasks: BackgroundTasks):
         logger.error(f"Slack command error: {e}")
         return JSONResponse(content={
             "response_type": "ephemeral", 
-            "text": "❌ Error processing command"
+            "text": "❌ Hmm, I'm having trouble understanding that. Try asking about a team member or company status."
         })
 
-async def process_query_background(query: str, analysis: Dict, response_url: str):
-    """Process query in background"""
+async def process_conversational_query(query: str, response_url: str):
+    """Process query and respond conversationally"""
     try:
+        # Understand what the CEO is asking
+        analysis = await understand_ceo_query(query)
+        
+        # Get current tasks
         tasks = await get_all_tasks()
         
         if not tasks:
-            payload = {"response_type": "in_channel", "text": "📭 No tasks found in Notion"}
+            response = "📭 I don't see any tasks in the system right now. The team might be between projects or the connection needs checking."
         else:
-            # Filter tasks based on analysis
-            filtered_tasks = tasks
-            intent = analysis['intent']
-            
-            if intent == 'person_query':
-                person = analysis.get('person_name', '').lower()
-                filtered_tasks = [t for t in tasks if any(person in owner.lower() for owner in t['owners'])]
-            elif intent == 'department_query':
-                dept = analysis.get('department')
-                filtered_tasks = [t for t in tasks if t['department'] == dept]
-            elif intent == 'status_query':
-                status = analysis.get('status')
-                filtered_tasks = [t for t in tasks if t['status'] == status]
-            elif intent == 'priority_query':
-                priority = analysis.get('priority')
-                filtered_tasks = [t for t in tasks if t['priority'] == priority]
-            elif intent == 'blocker_query':
-                blocker = analysis.get('blocker')
-                filtered_tasks = [t for t in tasks if t['blocker'] == blocker]
-            
-            # Format response
-            if intent == 'help':
-                payload = format_help_response(tasks)
-            elif intent == 'person_query':
-                payload = format_person_response(filtered_tasks, analysis['person_name'])
-            elif intent == 'brief':
-                payload = format_brief_response(tasks)
-            else:
-                payload = format_general_response(filtered_tasks, analysis)
+            # Generate natural response
+            response = generate_conversational_response(tasks, analysis, query)
         
-        await send_slack_response(response_url, payload)
+        # Send response
+        await send_slack_response(response_url, {"response_type": "in_channel", "text": response})
         
     except Exception as e:
-        logger.error(f"Background error: {e}")
-        error_payload = {"response_type": "in_channel", "text": "❌ Error processing request"}
-        await send_slack_response(response_url, error_payload)
+        logger.error(f"Conversation error: {e}")
+        error_msg = "❌ Sorry, I'm having trouble pulling the latest updates. Try again in a moment."
+        await send_slack_response(response_url, {"response_type": "in_channel", "text": error_msg})
 
-def format_person_response(tasks: List[Dict], person_name: str) -> Dict:
-    """Format person-specific response with all relevant columns"""
-    if not tasks:
-        return {"response_type": "in_channel", "text": f"👤 No tasks found for {person_name}"}
-    
-    response = f"👤 *{person_name}'s Tasks* ({len(tasks)} total)\n\n"
-    
-    for i, task in enumerate(tasks[:6], 1):
-        response += f"*{i}. {task['name']}*\n"
-        response += f"   _Status:_ {task['status']} | _Due:_ {task['due_date']} | _Priority:_ {task['priority']}\n"
-        
-        # Show blocker if it's not "None"
-        if task['blocker'] != 'None' and task['blocker'] != 'Not set':
-            response += f"   _Blocker:_ {task['blocker']}\n"
-        
-        # Show next steps if available
-        if task['next_step'] and task['next_step'] != 'Not specified':
-            response += f"   _Next:_ {task['next_step'][:100]}...\n"
-        
-        response += f"   _Dept:_ {task['department']}\n\n"
-    
-    return {"response_type": "in_channel", "text": response}
-
-def format_brief_response(tasks: List[Dict]) -> Dict:
-    """Format company brief showing overview of all columns"""
-    dept_counts = {}
-    status_counts = {}
-    priority_counts = {}
-    blocker_counts = {}
-    
-    for task in tasks:
-        dept_counts[task['department']] = dept_counts.get(task['department'], 0) + 1
-        status_counts[task['status']] = status_counts.get(task['status'], 0) + 1
-        priority_counts[task['priority']] = priority_counts.get(task['priority'], 0) + 1
-        blocker_counts[task['blocker']] = blocker_counts.get(task['blocker'], 0) + 1
-    
-    response = "🏢 *Company Brief*\n\n"
-    response += "📈 *By Department:*\n"
-    for dept, count in dept_counts.items():
-        response += f"• {dept}: {count} tasks\n"
-    
-    response += "\n🔄 *By Status:*\n"
-    for status, count in status_counts.items():
-        response += f"• {status}: {count} tasks\n"
-    
-    response += "\n🎯 *By Priority:*\n"
-    for priority, count in priority_counts.items():
-        response += f"• {priority}: {count} tasks\n"
-    
-    response += f"\n📊 *Total:* {len(tasks)} tasks"
-    return {"response_type": "in_channel", "text": response}
-
-def format_help_response(tasks: List[Dict]) -> Dict:
-    """Format help response"""
-    help_text = f"""🤖 *Task Intel Bot*
-
-*Ask anything naturally:*
-• "what is omar working on?"
-• "show me high priority tasks" 
-• "what's blocked?"
-• "tech department update"
-• "company brief"
-
-*All columns supported:*
-• Task Name, Owner, Status, Due Date
-• Next Steps, Blocker, Impact, Priority
-
-*Examples:*
-• `/intel what is omar working on?`
-• `/intel high priority tasks`
-• `/intel what's in progress?`
-• `/intel brief`
-
-📊 *Live data:* {len(tasks)} tasks tracked"""
-    
-    return {"response_type": "in_channel", "text": help_text}
-
-def format_general_response(tasks: List[Dict], analysis: Dict) -> Dict:
-    """Format general response for other query types"""
-    if not tasks:
-        return {"response_type": "in_channel", "text": "🔍 No matching tasks found"}
-    
-    intent = analysis.get('intent', 'results').replace('_', ' ').title()
-    response = f"📋 *{intent}* ({len(tasks)} tasks)\n\n"
-    
-    for i, task in enumerate(tasks[:4], 1):
-        owners = ', '.join(task['owners']) if task['owners'] else 'Unassigned'
-        response += f"*{i}. {task['name']}*\n"
-        response += f"   {owners} | {task['status']} | {task['priority']} | Due: {task['due_date']}\n\n"
-    
-    return {"response_type": "in_channel", "text": response}
+async def send_slack_response(response_url: str, payload: Dict):
+    """Send response to Slack"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(response_url, json=payload) as resp:
+                if resp.status != 200:
+                    logger.error(f"Slack response failed: {await resp.text()}")
+    except Exception as e:
+        logger.error(f"Failed to send to Slack: {e}")
 
 if __name__ == "__main__":
     import uvicorn
