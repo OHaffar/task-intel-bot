@@ -35,7 +35,7 @@ try:
     from notion_client import Client
     notion_token = os.getenv('NOTION_TOKEN')
     if notion_token:
-        notion = Client(auth=notion_token, timeout_ms=10000)  # FIXED: timeout_ms instead of timeout
+        notion = Client(auth=notion_token, timeout_ms=10000)
         logger.info("Notion client initialized successfully")
     else:
         logger.warning("NOTION_TOKEN not set - Notion features disabled")
@@ -83,6 +83,46 @@ async def health_check():
         }
     }
     return status
+
+@app.get("/debug/tasks")
+async def debug_tasks():
+    """Debug endpoint to see actual tasks"""
+    try:
+        tasks = await get_all_tasks()
+        all_owners = set()
+        for task in tasks:
+            all_owners.update(task['owners'])
+        
+        return {
+            "total_tasks": len(tasks),
+            "all_owners": sorted(list(all_owners)),
+            "sample_tasks": tasks[:3] if tasks else "No tasks"
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/debug/notion")
+async def debug_notion():
+    """Debug Notion connection"""
+    try:
+        if not notion:
+            return {"error": "Notion client not initialized"}
+        
+        results = {}
+        for dept, db_id in DATABASES.items():
+            if db_id:
+                try:
+                    result = notion.databases.query(database_id=db_id, page_size=5)
+                    results[dept] = {
+                        "pages_found": len(result.get('results', [])),
+                        "sample_page": result.get('results', [])[0] if result.get('results') else None
+                    }
+                except Exception as e:
+                    results[dept] = {"error": str(e)}
+        
+        return results
+    except Exception as e:
+        return {"error": str(e)}
 
 async def analyze_query_fast(query: str) -> Dict:
     """Fast query analysis with company-specific team member detection"""
@@ -133,7 +173,7 @@ async def analyze_query_fast(query: str) -> Dict:
     elif 'medium priority' in query_lower or 'medium-priority' in query_lower:
         return {"intent": "priority_query", "priority": "Medium"}
     elif 'priority' in query_lower:
-        return {"intent": "priority_query", "priority": "High"}  # Default to high
+        return {"intent": "priority_query", "priority": "High"}
     
     # Time-based queries
     if 'this week' in query_lower or 'week' in query_lower:
@@ -195,13 +235,26 @@ def parse_notion_page(page: Dict, department: str) -> Optional[Dict]:
         for person in people_data:
             name = person.get('name')
             if name:
-                # Map to known team members if possible
+                # FLEXIBLE NAME MATCHING - Improved version
+                name_lower = name.lower()
+                
+                # First try exact match
+                exact_match = False
                 for team_member in COMPANY_TEAM:
-                    if team_member.lower() in name.lower():
+                    if team_member.lower() == name_lower:
                         owners.append(team_member)
+                        exact_match = True
                         break
-                else:
-                    owners.append(name)  # Keep original name if no match
+                
+                if not exact_match:
+                    # Try partial match (e.g., "Omar Smith" contains "Omar")
+                    for team_member in COMPANY_TEAM:
+                        if team_member.lower() in name_lower:
+                            owners.append(team_member)
+                            break
+                    else:
+                        # If no match, keep the original name
+                        owners.append(name)
             elif person.get('id'):
                 owners.append(f"user_{person['id'][-6:]}")
         
@@ -422,9 +475,13 @@ def filter_tasks_based_on_analysis(tasks: List[Dict], analysis: Dict) -> List[Di
     if intent == 'person_query':
         person_name = analysis.get('person_name', '')
         if person_name:
-            filtered = [t for t in tasks if any(
-                person_name.lower() in owner.lower() for owner in t['owners']
-            )]
+            # More flexible person matching
+            filtered = []
+            for task in tasks:
+                for owner in task['owners']:
+                    if person_name.lower() in owner.lower():
+                        filtered.append(task)
+                        break
     
     elif intent == 'department_query':
         department = analysis.get('department')
