@@ -1,10 +1,10 @@
 from fastapi import FastAPI, Request, BackgroundTasks, Form
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse
 import os
 import logging
 import asyncio
 import aiohttp
-from datetime import datetime, date, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional
 import cachetools
 import time
@@ -26,7 +26,7 @@ DATABASES = {
     'Finance': os.getenv('NOTION_DB_FIN', '')
 }
 
-# MANUAL USER ID MAPPING - SOLVES THE PROBLEM!
+# MANUAL USER ID MAPPING
 USER_ID_TO_NAME = {
     'c0ccc544-c4c3-4a32-9d3b-23a500383b0b': 'Brazil',
     '080c42c6-fbb2-47d6-9774-1d086c7c3210': 'Nishanth',
@@ -68,41 +68,41 @@ async def health_check():
     return {
         "status": "healthy", 
         "timestamp": datetime.utcnow().isoformat(),
-        "user_mapping_configured": len(USER_ID_TO_NAME)
+        "team_members": len(TEAM_MEMBERS)
     }
 
-async def understand_ceo_query(query: str) -> Dict:
-    """Understand what the CEO/COO is asking in natural language"""
+async def understand_query(query: str) -> Dict:
+    """Understand natural language queries"""
     if not query:
-        return {"intent": "company_update", "tone": "confident"}
+        return {"intent": "company_update"}
     
     query_lower = query.lower()
     
-    # Check if asking about a specific person
+    # Check for team members
     for person_key, person_name in TEAM_MEMBERS.items():
         if person_key in query_lower:
-            return {
-                "intent": "person_update", 
-                "person": person_name,
-                "tone": "supportive"
-            }
+            return {"intent": "person_update", "person": person_name}
     
-    # Check for specific types of updates
-    if any(word in query_lower for word in ['how are we', 'how things', 'company', 'brief', 'overview']):
-        return {"intent": "company_update", "tone": "confident"}
+    # Check for other intents
+    if any(word in query_lower for word in ['brief', 'overview', 'company', 'status']):
+        return {"intent": "company_update"}
     
-    if any(word in query_lower for word in ['block', 'stuck', 'issue', 'problem']):
-        return {"intent": "blockers_update", "tone": "concerned"}
+    if any(word in query_lower for word in ['block', 'stuck', 'issue']):
+        return {"intent": "blockers_update"}
     
-    if any(word in query_lower for word in ['priority', 'important', 'critical']):
-        return {"intent": "priorities_update", "tone": "focused"}
+    if any(word in query_lower for word in ['priority', 'important']):
+        return {"intent": "priorities_update"}
     
-    if any(word in query_lower for word in ['tech', 'engineering', 'commercial', 'operations', 'finance']):
-        dept = next((d for d in ['tech', 'commercial', 'operations', 'finance'] if d in query_lower), 'company')
-        return {"intent": "department_update", "department": dept.title(), "tone": "informative"}
+    if any(word in query_lower for word in ['tech', 'engineering']):
+        return {"intent": "department_update", "department": "Tech"}
+    elif any(word in query_lower for word in ['commercial', 'sales']):
+        return {"intent": "department_update", "department": "Commercial"}
+    elif any(word in query_lower for word in ['operations', 'ops']):
+        return {"intent": "department_update", "department": "Operations"}
+    elif any(word in query_lower for word in ['finance']):
+        return {"intent": "department_update", "department": "Finance"}
     
-    # Default to company update
-    return {"intent": "company_update", "tone": "confident"}
+    return {"intent": "company_update"}
 
 async def get_all_tasks() -> List[Dict]:
     """Get all tasks with caching"""
@@ -123,7 +123,7 @@ async def get_all_tasks() -> List[Dict]:
                 )
                 
                 for page in result.get('results', []):
-                    task = parse_task_with_fixed_mapping(page, dept)
+                    task = parse_task(page, dept)
                     if task:
                         tasks.append(task)
                         
@@ -131,11 +131,10 @@ async def get_all_tasks() -> List[Dict]:
                 logger.error(f"Error fetching {dept}: {e}")
     
     cache[cache_key] = tasks
-    logger.info(f"Loaded {len(tasks)} tasks with proper name mapping")
     return tasks
 
-def parse_task_with_fixed_mapping(page: Dict, department: str) -> Optional[Dict]:
-    """Parse task using our manual user ID mapping"""
+def parse_task(page: Dict, department: str) -> Optional[Dict]:
+    """Parse task using manual user ID mapping"""
     try:
         props = page.get('properties', {})
         
@@ -144,19 +143,16 @@ def parse_task_with_fixed_mapping(page: Dict, department: str) -> Optional[Dict]
         if not name or name == 'No name':
             return None
         
-        # FIXED: Use manual mapping to convert user IDs to names
+        # Convert user IDs to names using our mapping
         owners = []
         people_data = props.get('Owner', {}).get('people', [])
         for person in people_data:
             user_id = person.get('id')
             if user_id and user_id in USER_ID_TO_NAME:
-                # Use our manual mapping
                 owners.append(USER_ID_TO_NAME[user_id])
             elif person.get('name'):
-                # Fallback to name if provided
                 owners.append(person.get('name'))
             elif user_id:
-                # Fallback to user ID if no mapping
                 owners.append(f"user_{user_id[-6:]}")
         
         due_date_raw = props.get('Due Date', {}).get('date', {}).get('start')
@@ -165,7 +161,7 @@ def parse_task_with_fixed_mapping(page: Dict, department: str) -> Optional[Dict]
             'name': name,
             'owners': owners,
             'status': get_property(props, 'Status', 'select'),
-            'due_date': due_date_raw.split('T')[0] if due_date_raw else 'Not scheduled',
+            'due_date': due_date_raw.split('T')[0] if due_date_raw else 'No date',
             'next_step': get_property(props, 'Next Steps', 'rich_text'),
             'blocker': get_property(props, 'Blocker', 'select'),
             'impact': get_property(props, 'Impact', 'rich_text'),
@@ -186,4 +182,159 @@ def get_property(props, field_name: str, field_type: str) -> str:
         return titles[0].get('plain_text', '') if titles else ''
     elif field_type == 'select':
         select = field.get('select', {})
-        return select.get('
+        return select.get('name', 'Not set')
+    elif field_type == 'date':
+        date_obj = field.get('date', {})
+        return date_obj.get('start', 'No date')
+    elif field_type == 'rich_text':
+        rich_text = field.get('rich_text', [])
+        return rich_text[0].get('plain_text', '') if rich_text else ''
+    
+    return ''
+
+def generate_response(tasks: List[Dict], analysis: Dict) -> str:
+    """Generate conversational response"""
+    intent = analysis['intent']
+    
+    if intent == 'person_update':
+        person = analysis['person']
+        person_tasks = [t for t in tasks if any(person.lower() in owner.lower() for owner in t['owners'])]
+        
+        if not person_tasks:
+            return f"👤 *{person}* doesn't have any tasks assigned right now."
+        
+        in_progress = [t for t in person_tasks if t['status'] == 'In progress']
+        todo = [t for t in person_tasks if t['status'] == 'To Do']
+        
+        response = f"👤 *Here's what {person} is working on:*\n\n"
+        
+        if in_progress:
+            response += f"*In Progress ({len(in_progress)}):*\n"
+            for task in in_progress[:3]:
+                response += f"• {task['name']}"
+                if task['due_date'] != 'No date':
+                    response += f" (due {task['due_date']})"
+                if task['blocker'] not in ['None', 'Not set']:
+                    response += f" - ⚠️ {task['blocker']} blocker"
+                response += "\n"
+        
+        if todo:
+            response += f"\n*Up Next ({len(todo)}):*\n"
+            for task in todo[:2]:
+                response += f"• {task['name']}\n"
+        
+        return response
+    
+    elif intent == 'company_update':
+        total_tasks = len(tasks)
+        in_progress = len([t for t in tasks if t['status'] == 'In progress'])
+        blocked = len([t for t in tasks if t['blocker'] not in ['None', 'Not set']])
+        
+        response = "🏢 *Company Update*\n\n"
+        response += f"*{total_tasks} active tasks* across the company:\n"
+        response += f"• {in_progress} in progress\n"
+        response += f"• {blocked} currently blocked\n"
+        
+        return response
+    
+    elif intent == 'blockers_update':
+        blocked_tasks = [t for t in tasks if t['blocker'] not in ['None', 'Not set']]
+        
+        if not blocked_tasks:
+            return "✅ *No blockers right now!* Everything is moving smoothly."
+        
+        response = "⚠️ *Current Blockers:*\n\n"
+        for task in blocked_tasks[:5]:
+            owners = ', '.join(task['owners']) if task['owners'] else 'Unassigned'
+            response += f"• {task['name']} ({owners}) - {task['department']}\n"
+        
+        return response
+    
+    elif intent == 'priorities_update':
+        high_priority = [t for t in tasks if t['priority'] == 'High']
+        
+        if not high_priority:
+            return "📋 *No high-priority tasks right now.*"
+        
+        response = "🎯 *High-Priority Items:*\n\n"
+        for task in high_priority[:5]:
+            owners = ', '.join(task['owners']) if task['owners'] else 'Unassigned'
+            response += f"• {task['name']} ({owners})\n"
+        
+        return response
+    
+    else:  # department_update
+        dept = analysis.get('department', 'All')
+        dept_tasks = [t for t in tasks if t['department'] == dept] if dept != 'All' else tasks
+        
+        response = f"📊 *{dept} Department:* {len(dept_tasks)} tasks\n"
+        
+        status_counts = {}
+        for task in dept_tasks:
+            status_counts[task['status']] = status_counts.get(task['status'], 0) + 1
+        
+        for status, count in status_counts.items():
+            response += f"• {status}: {count} tasks\n"
+        
+        return response
+
+@app.post("/slack/command")
+async def slack_command(request: Request, background_tasks: BackgroundTasks):
+    """Handle Slack commands"""
+    try:
+        form_data = await request.form()
+        query = form_data.get("text", "").strip()
+        response_url = form_data.get("response_url")
+        
+        # Immediate response
+        immediate_response = {
+            "response_type": "ephemeral",
+            "text": "💭 Checking tasks..."
+        }
+        
+        # Process in background
+        if response_url:
+            background_tasks.add_task(process_query, query, response_url)
+        
+        return JSONResponse(content=immediate_response)
+        
+    except Exception as e:
+        logger.error(f"Slack command error: {e}")
+        return JSONResponse(content={
+            "response_type": "ephemeral", 
+            "text": "❌ Error processing command"
+        })
+
+async def process_query(query: str, response_url: str):
+    """Process query in background"""
+    try:
+        analysis = await understand_query(query)
+        tasks = await get_all_tasks()
+        
+        if not tasks:
+            response = "📭 No tasks found in the system."
+        else:
+            response = generate_response(tasks, analysis)
+        
+        payload = {"response_type": "in_channel", "text": response}
+        await send_slack_response(response_url, payload)
+        
+    except Exception as e:
+        logger.error(f"Processing error: {e}")
+        error_msg = "❌ Sorry, I'm having trouble right now."
+        await send_slack_response(response_url, {"response_type": "in_channel", "text": error_msg})
+
+async def send_slack_response(response_url: str, payload: Dict):
+    """Send response to Slack"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(response_url, json=payload) as resp:
+                if resp.status != 200:
+                    logger.error(f"Slack response failed: {await resp.text()}")
+    except Exception as e:
+        logger.error(f"Failed to send to Slack: {e}")
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
