@@ -72,37 +72,48 @@ async def health_check():
     }
 
 async def understand_query(query: str) -> Dict:
-    """Understand natural language queries"""
+    """Understand natural language queries with conversation support"""
     if not query:
-        return {"intent": "company_update"}
+        return {"intent": "company_update", "tone": "friendly"}
     
     query_lower = query.lower()
+    
+    # Greetings and conversational phrases
+    if any(word in query_lower for word in ['hi', 'hello', 'hey', 'howdy']):
+        return {"intent": "greeting", "tone": "warm"}
+    
+    if any(word in query_lower for word in ['thanks', 'thank you', 'appreciate']):
+        return {"intent": "thanks", "tone": "appreciative"}
+    
+    if any(word in query_lower for word in ['next steps', 'what next', 'what should', 'recommend']):
+        return {"intent": "next_steps", "tone": "helpful"}
     
     # Check for team members
     for person_key, person_name in TEAM_MEMBERS.items():
         if person_key in query_lower:
-            return {"intent": "person_update", "person": person_name}
+            return {"intent": "person_update", "person": person_name, "tone": "supportive"}
     
     # Check for other intents
-    if any(word in query_lower for word in ['brief', 'overview', 'company', 'status']):
-        return {"intent": "company_update"}
+    if any(word in query_lower for word in ['brief', 'overview', 'company', 'status', 'update']):
+        return {"intent": "company_update", "tone": "confident"}
     
-    if any(word in query_lower for word in ['block', 'stuck', 'issue']):
-        return {"intent": "blockers_update"}
+    if any(word in query_lower for word in ['block', 'stuck', 'issue', 'problem', 'blocker']):
+        return {"intent": "blockers_update", "tone": "concerned"}
     
-    if any(word in query_lower for word in ['priority', 'important']):
-        return {"intent": "priorities_update"}
+    if any(word in query_lower for word in ['priority', 'important', 'critical', 'urgent']):
+        return {"intent": "priorities_update", "tone": "focused"}
     
     if any(word in query_lower for word in ['tech', 'engineering']):
-        return {"intent": "department_update", "department": "Tech"}
-    elif any(word in query_lower for word in ['commercial', 'sales']):
-        return {"intent": "department_update", "department": "Commercial"}
+        return {"intent": "department_update", "department": "Tech", "tone": "informative"}
+    elif any(word in query_lower for word in ['commercial', 'sales', 'business']):
+        return {"intent": "department_update", "department": "Commercial", "tone": "informative"}
     elif any(word in query_lower for word in ['operations', 'ops']):
-        return {"intent": "department_update", "department": "Operations"}
-    elif any(word in query_lower for word in ['finance']):
-        return {"intent": "department_update", "department": "Finance"}
+        return {"intent": "department_update", "department": "Operations", "tone": "informative"}
+    elif any(word in query_lower for word in ['finance', 'financial']):
+        return {"intent": "department_update", "department": "Finance", "tone": "informative"}
     
-    return {"intent": "company_update"}
+    # Default to helpful response
+    return {"intent": "help", "tone": "friendly"}
 
 async def get_all_tasks() -> List[Dict]:
     """Get all tasks with caching"""
@@ -193,47 +204,109 @@ def get_property(props, field_name: str, field_type: str) -> str:
     return ''
 
 def generate_response(tasks: List[Dict], analysis: Dict) -> str:
-    """Generate conversational response"""
+    """Generate conversational response with next steps"""
     intent = analysis['intent']
+    tone = analysis.get('tone', 'friendly')
+    
+    if intent == 'greeting':
+        return f"👋 Hey there! I'm your Task Intel Bot. I can tell you what everyone's working on, company status, blockers, or priorities. What would you like to know?"
+    
+    if intent == 'thanks':
+        return "🙏 You're welcome! Happy to help. What else can I update you on?"
+    
+    if intent == 'help':
+        return """🤖 *How I can help you:*
+
+• *People:* "What is Omar working on?" or "How's Derrick's workload?"
+• *Company:* "Company update" or "How are we doing?"
+• *Blockers:* "What's blocked?" or "Any issues?"
+• *Priorities:* "High priority items" or "What's urgent?"
+• *Departments:* "Tech status" or "Commercial update"
+
+Just ask naturally! I understand conversational language."""
+
+    if intent == 'next_steps':
+        # Show tasks with meaningful next steps
+        tasks_with_next_steps = [t for t in tasks if t['next_step'] and t['next_step'] not in ['', 'Not specified']]
+        
+        if not tasks_with_next_steps:
+            return "📋 *Next Steps Overview:*\nMost tasks don't have specific next steps defined yet. The team is likely executing on current priorities."
+        
+        response = "📋 *Here are the key next steps across the company:*\n\n"
+        
+        for i, task in enumerate(tasks_with_next_steps[:6], 1):
+            owners = ', '.join(task['owners']) if task['owners'] else 'Team'
+            response += f"*{i}. {task['name']}* ({owners})\n"
+            response += f"   👉 *Next:* {task['next_step']}\n"
+            if task['due_date'] != 'No date':
+                response += f"   📅 Due: {task['due_date']}\n"
+            response += "\n"
+        
+        return response
     
     if intent == 'person_update':
         person = analysis['person']
         person_tasks = [t for t in tasks if any(person.lower() in owner.lower() for owner in t['owners'])]
         
         if not person_tasks:
-            return f"👤 *{person}* doesn't have any tasks assigned right now."
+            return f"👤 *{person}* doesn't have any tasks assigned right now. They might be between projects or focusing on ad-hoc work."
         
+        # Show tasks with next steps prominently
+        tasks_with_next_steps = [t for t in person_tasks if t['next_step'] and t['next_step'] not in ['', 'Not specified']]
         in_progress = [t for t in person_tasks if t['status'] == 'In progress']
-        todo = [t for t in person_tasks if t['status'] == 'To Do']
         
         response = f"👤 *Here's what {person} is working on:*\n\n"
         
         if in_progress:
-            response += f"*In Progress ({len(in_progress)}):*\n"
-            for task in in_progress[:3]:
-                response += f"• {task['name']}"
+            response += f"*Currently Working On ({len(in_progress)}):*\n"
+            for task in in_progress[:4]:
+                response += f"• *{task['name']}*"
                 if task['due_date'] != 'No date':
                     response += f" (due {task['due_date']})"
                 if task['blocker'] not in ['None', 'Not set']:
-                    response += f" - ⚠️ {task['blocker']} blocker"
+                    response += f" 🚧 {task['blocker']} blocker"
+                response += "\n"
+                
+                # Show next step if available
+                if task['next_step'] and task['next_step'] not in ['', 'Not specified']:
+                    response += f"  👉 *Next:* {task['next_step']}\n"
                 response += "\n"
         
-        if todo:
-            response += f"\n*Up Next ({len(todo)}):*\n"
-            for task in todo[:2]:
-                response += f"• {task['name']}\n"
+        if tasks_with_next_steps:
+            response += f"*Key Next Steps ({len(tasks_with_next_steps)}):*\n"
+            for task in tasks_with_next_steps[:3]:
+                response += f"• {task['next_step']}\n"
+            response += "\n"
         
+        response += f"*Summary:* {len(person_tasks)} total tasks • {len([t for t in person_tasks if t['priority'] == 'High'])} high priority"
         return response
     
     elif intent == 'company_update':
         total_tasks = len(tasks)
         in_progress = len([t for t in tasks if t['status'] == 'In progress'])
         blocked = len([t for t in tasks if t['blocker'] not in ['None', 'Not set']])
+        high_priority = len([t for t in tasks if t['priority'] == 'High'])
         
         response = "🏢 *Company Update*\n\n"
-        response += f"*{total_tasks} active tasks* across the company:\n"
+        response += f"We have *{total_tasks} active tasks* across the company:\n"
         response += f"• {in_progress} in progress\n"
-        response += f"• {blocked} currently blocked\n"
+        response += f"• {blocked} currently blocked\n" 
+        response += f"• {high_priority} high priority items\n\n"
+        
+        # Show critical blockers
+        major_blockers = [t for t in tasks if t['blocker'] == 'Major']
+        if major_blockers:
+            response += "🚨 *Critical items needing attention:*\n"
+            for task in major_blockers[:2]:
+                response += f"• {task['name']} ({task['department']})\n"
+            response += "\n"
+        
+        # Show key next steps
+        important_next_steps = [t for t in tasks if t['next_step'] and t['priority'] == 'High']
+        if important_next_steps:
+            response += "🎯 *Key next steps this week:*\n"
+            for task in important_next_steps[:3]:
+                response += f"• {task['next_step']}\n"
         
         return response
     
@@ -241,12 +314,26 @@ def generate_response(tasks: List[Dict], analysis: Dict) -> str:
         blocked_tasks = [t for t in tasks if t['blocker'] not in ['None', 'Not set']]
         
         if not blocked_tasks:
-            return "✅ *No blockers right now!* Everything is moving smoothly."
+            return "✅ *No blockers right now!* Everything is moving smoothly across all teams."
         
-        response = "⚠️ *Current Blockers:*\n\n"
-        for task in blocked_tasks[:5]:
-            owners = ', '.join(task['owners']) if task['owners'] else 'Unassigned'
-            response += f"• {task['name']} ({owners}) - {task['department']}\n"
+        response = "⚠️ *Here's what needs attention:*\n\n"
+        
+        major_blockers = [t for t in blocked_tasks if t['blocker'] == 'Major']
+        minor_blockers = [t for t in blocked_tasks if t['blocker'] == 'Minor']
+        
+        if major_blockers:
+            response += "🚨 *Major Blockers:*\n"
+            for task in major_blockers[:3]:
+                owners = ', '.join(task['owners']) if task['owners'] else 'Unassigned'
+                response += f"• *{task['name']}* ({owners})\n"
+                if task['next_step'] and task['next_step'] not in ['', 'Not specified']:
+                    response += f"  👉 *Action needed:* {task['next_step']}\n"
+                response += "\n"
+        
+        if minor_blockers:
+            response += "🔸 *Minor Issues:*\n"
+            for task in minor_blockers[:2]:
+                response += f"• {task['name']} - {task['department']}\n"
         
         return response
     
@@ -254,12 +341,22 @@ def generate_response(tasks: List[Dict], analysis: Dict) -> str:
         high_priority = [t for t in tasks if t['priority'] == 'High']
         
         if not high_priority:
-            return "📋 *No high-priority tasks right now.*"
+            return "📋 *No high-priority tasks right now.* The team is focused on regular work items."
         
-        response = "🎯 *High-Priority Items:*\n\n"
-        for task in high_priority[:5]:
+        response = "🎯 *High-Priority Focus Items:*\n\n"
+        
+        for i, task in enumerate(high_priority[:5], 1):
             owners = ', '.join(task['owners']) if task['owners'] else 'Unassigned'
-            response += f"• {task['name']} ({owners})\n"
+            response += f"*{i}. {task['name']}* ({owners})\n"
+            response += f"   📍 {task['department']} • Due: {task['due_date']}\n"
+            
+            if task['next_step'] and task['next_step'] not in ['', 'Not specified']:
+                response += f"   👉 *Next:* {task['next_step']}\n"
+            
+            if task['blocker'] not in ['None', 'Not set']:
+                response += f"   🚧 {task['blocker']} blocker\n"
+            
+            response += "\n"
         
         return response
     
@@ -267,7 +364,8 @@ def generate_response(tasks: List[Dict], analysis: Dict) -> str:
         dept = analysis.get('department', 'All')
         dept_tasks = [t for t in tasks if t['department'] == dept] if dept != 'All' else tasks
         
-        response = f"📊 *{dept} Department:* {len(dept_tasks)} tasks\n"
+        response = f"📊 *{dept} Department Update*\n\n"
+        response += f"*{len(dept_tasks)} active tasks* in progress:\n\n"
         
         status_counts = {}
         for task in dept_tasks:
@@ -276,11 +374,18 @@ def generate_response(tasks: List[Dict], analysis: Dict) -> str:
         for status, count in status_counts.items():
             response += f"• {status}: {count} tasks\n"
         
+        # Show key next steps for the department
+        dept_next_steps = [t for t in dept_tasks if t['next_step'] and t['next_step'] not in ['', 'Not specified']]
+        if dept_next_steps:
+            response += f"\n*Key next steps for {dept}:*\n"
+            for task in dept_next_steps[:3]:
+                response += f"• {task['next_step']}\n"
+        
         return response
 
 @app.post("/slack/command")
 async def slack_command(request: Request, background_tasks: BackgroundTasks):
-    """Handle Slack commands"""
+    """Handle Slack commands with conversational responses"""
     try:
         form_data = await request.form()
         query = form_data.get("text", "").strip()
@@ -289,7 +394,7 @@ async def slack_command(request: Request, background_tasks: BackgroundTasks):
         # Immediate response
         immediate_response = {
             "response_type": "ephemeral",
-            "text": "💭 Checking tasks..."
+            "text": "💭 Let me check on that for you..."
         }
         
         # Process in background
@@ -302,7 +407,7 @@ async def slack_command(request: Request, background_tasks: BackgroundTasks):
         logger.error(f"Slack command error: {e}")
         return JSONResponse(content={
             "response_type": "ephemeral", 
-            "text": "❌ Error processing command"
+            "text": "❌ Hmm, I'm having trouble understanding. Try asking about a team member or company status."
         })
 
 async def process_query(query: str, response_url: str):
@@ -312,7 +417,7 @@ async def process_query(query: str, response_url: str):
         tasks = await get_all_tasks()
         
         if not tasks:
-            response = "📭 No tasks found in the system."
+            response = "📭 I don't see any tasks in the system right now. The team might be between projects."
         else:
             response = generate_response(tasks, analysis)
         
@@ -321,7 +426,7 @@ async def process_query(query: str, response_url: str):
         
     except Exception as e:
         logger.error(f"Processing error: {e}")
-        error_msg = "❌ Sorry, I'm having trouble right now."
+        error_msg = "❌ Sorry, I'm having trouble pulling the latest updates. Try again in a moment."
         await send_slack_response(response_url, {"response_type": "in_channel", "text": error_msg})
 
 async def send_slack_response(response_url: str, payload: Dict):
