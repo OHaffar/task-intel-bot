@@ -26,6 +26,17 @@ DATABASES = {
     'Finance': os.getenv('NOTION_DB_FIN', '')
 }
 
+# MANUAL USER ID MAPPING - SOLVES THE PROBLEM!
+USER_ID_TO_NAME = {
+    'c0ccc544-c4c3-4a32-9d3b-23a500383b0b': 'Brazil',
+    '080c42c6-fbb2-47d6-9774-1d086c7c3210': 'Nishanth',
+    'ff3909f8-9fa8-4013-9d12-c1e86f8ebffe': 'Chethan',
+    'ec6410cf-b2cb-4ea8-8539-fb973e00a028': 'Derrick',
+    'f9776ebc-9f9c-4bc1-89de-903114a4107a': 'Deema',
+    '24d871d8-8afe-498b-a434-e2609bb1789d': 'Omar',
+    'beadea32-bdbc-4a49-be45-5096886c493a': 'Bhavya'
+}
+
 # Team member names for natural conversation
 TEAM_MEMBERS = {
     'omar': 'Omar',
@@ -57,125 +68,8 @@ async def health_check():
     return {
         "status": "healthy", 
         "timestamp": datetime.utcnow().isoformat(),
-        "mode": "conversational"
+        "user_mapping_configured": len(USER_ID_TO_NAME)
     }
-
-@app.get("/debug/user-mapping")
-async def debug_user_mapping():
-    """Debug endpoint to see user IDs and their tasks"""
-    try:
-        tasks = await get_all_tasks_with_raw_data()
-        
-        # Group tasks by user ID
-        user_tasks = {}
-        for task in tasks:
-            for owner in task['raw_owners']:
-                user_id = owner.get('id', 'unknown')
-                user_name = owner.get('name', 'No name')
-                
-                if user_id not in user_tasks:
-                    user_tasks[user_id] = {
-                        'name': user_name,
-                        'tasks': [],
-                        'task_count': 0
-                    }
-                
-                user_tasks[user_id]['tasks'].append({
-                    'task_name': task['name'],
-                    'department': task['department'],
-                    'status': task['status']
-                })
-                user_tasks[user_id]['task_count'] += 1
-        
-        return {
-            "total_tasks": len(tasks),
-            "user_mapping": user_tasks,
-            "all_user_ids": list(user_tasks.keys())
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-async def get_all_tasks_with_raw_data() -> List[Dict]:
-    """Get tasks with raw user data for debugging"""
-    cache_key = "raw_tasks"
-    if cache_key in cache:
-        return cache[cache_key]
-    
-    tasks = []
-    if not notion:
-        return tasks
-    
-    # Fetch all databases
-    for dept, db_id in DATABASES.items():
-        if db_id:
-            try:
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: notion.databases.query(database_id=db_id, page_size=100)
-                )
-                
-                for page in result.get('results', []):
-                    task = parse_task_with_raw_owners(page, dept)
-                    if task:
-                        tasks.append(task)
-                        
-            except Exception as e:
-                logger.error(f"Error fetching {dept}: {e}")
-    
-    cache[cache_key] = tasks
-    return tasks
-
-def parse_task_with_raw_owners(page: Dict, department: str) -> Optional[Dict]:
-    """Parse task with raw owner data for debugging"""
-    try:
-        props = page.get('properties', {})
-        
-        # Get task name
-        name = get_property(props, 'Task Name', 'title')
-        if not name or name == 'No name':
-            return None
-        
-        # Get raw owner data (exactly what Notion returns)
-        raw_owners = props.get('Owner', {}).get('people', [])
-        
-        due_date_raw = props.get('Due Date', {}).get('date', {}).get('start')
-        
-        return {
-            'name': name,
-            'raw_owners': raw_owners,  # Keep raw data for debugging
-            'owners': [owner.get('name') or f"user_{owner.get('id', '')[-6:]}" for owner in raw_owners],
-            'status': get_property(props, 'Status', 'select'),
-            'due_date': due_date_raw.split('T')[0] if due_date_raw else 'Not scheduled',
-            'next_step': get_property(props, 'Next Steps', 'rich_text'),
-            'blocker': get_property(props, 'Blocker', 'select'),
-            'impact': get_property(props, 'Impact', 'rich_text'),
-            'priority': get_property(props, 'Priority', 'select'),
-            'department': department,
-        }
-        
-    except Exception as e:
-        logger.error(f"Error parsing task: {e}")
-        return None
-
-def get_property(props, field_name: str, field_type: str) -> str:
-    """Extract property value from Notion"""
-    field = props.get(field_name, {})
-    
-    if field_type == 'title':
-        titles = field.get('title', [])
-        return titles[0].get('plain_text', '') if titles else ''
-    elif field_type == 'select':
-        select = field.get('select', {})
-        return select.get('name', 'Not set')
-    elif field_type == 'date':
-        date_obj = field.get('date', {})
-        return date_obj.get('start', 'No date')
-    elif field_type == 'rich_text':
-        rich_text = field.get('rich_text', [])
-        return rich_text[0].get('plain_text', '') if rich_text else ''
-    
-    return ''
-
-# ... (rest of your existing functions remain the same - understand_ceo_query, generate_conversational_response, etc.)
 
 async def understand_ceo_query(query: str) -> Dict:
     """Understand what the CEO/COO is asking in natural language"""
@@ -229,7 +123,7 @@ async def get_all_tasks() -> List[Dict]:
                 )
                 
                 for page in result.get('results', []):
-                    task = parse_task_naturally(page, dept)
+                    task = parse_task_with_fixed_mapping(page, dept)
                     if task:
                         tasks.append(task)
                         
@@ -237,10 +131,11 @@ async def get_all_tasks() -> List[Dict]:
                 logger.error(f"Error fetching {dept}: {e}")
     
     cache[cache_key] = tasks
+    logger.info(f"Loaded {len(tasks)} tasks with proper name mapping")
     return tasks
 
-def parse_task_naturally(page: Dict, department: str) -> Optional[Dict]:
-    """Parse task in a way that enables natural conversation"""
+def parse_task_with_fixed_mapping(page: Dict, department: str) -> Optional[Dict]:
+    """Parse task using our manual user ID mapping"""
     try:
         props = page.get('properties', {})
         
@@ -249,12 +144,20 @@ def parse_task_naturally(page: Dict, department: str) -> Optional[Dict]:
         if not name or name == 'No name':
             return None
         
-        # Get owner (simplified - show whatever Notion provides)
+        # FIXED: Use manual mapping to convert user IDs to names
         owners = []
         people_data = props.get('Owner', {}).get('people', [])
         for person in people_data:
-            name = person.get('name') or f"user_{person.get('id', '')[-6:]}"
-            owners.append(name)
+            user_id = person.get('id')
+            if user_id and user_id in USER_ID_TO_NAME:
+                # Use our manual mapping
+                owners.append(USER_ID_TO_NAME[user_id])
+            elif person.get('name'):
+                # Fallback to name if provided
+                owners.append(person.get('name'))
+            elif user_id:
+                # Fallback to user ID if no mapping
+                owners.append(f"user_{user_id[-6:]}")
         
         due_date_raw = props.get('Due Date', {}).get('date', {}).get('start')
         
@@ -273,6 +176,25 @@ def parse_task_naturally(page: Dict, department: str) -> Optional[Dict]:
     except Exception as e:
         logger.error(f"Error parsing task: {e}")
         return None
+
+def get_property(props, field_name: str, field_type: str) -> str:
+    """Extract property value from Notion"""
+    field = props.get(field_name, {})
+    
+    if field_type == 'title':
+        titles = field.get('title', [])
+        return titles[0].get('plain_text', '') if titles else ''
+    elif field_type == 'select':
+        select = field.get('select', {})
+        return select.get('name', 'Not set')
+    elif field_type == 'date':
+        date_obj = field.get('date', {})
+        return date_obj.get('start', 'No date')
+    elif field_type == 'rich_text':
+        rich_text = field.get('rich_text', [])
+        return rich_text[0].get('plain_text', '') if rich_text else ''
+    
+    return ''
 
 def generate_conversational_response(tasks: List[Dict], analysis: Dict, original_query: str) -> str:
     """Generate a human-like response instead of robot columns"""
@@ -391,7 +313,7 @@ def generate_conversational_response(tasks: List[Dict], analysis: Dict, original
         
         status_counts = {}
         for task in dept_tasks:
-            status_counts[task['status']] = status_counts.get(task['status'], 0) + 1
+            status_counts[task['status']] = status_counts.get(task['status', 0) + 1
         
         for status, count in status_counts.items():
             response += f"• {status}: {count} tasks\n"
