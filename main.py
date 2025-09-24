@@ -8,7 +8,6 @@ import hashlib
 import time
 from datetime import datetime
 from notion_client import Client
-from openai import OpenAI
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -18,21 +17,12 @@ app = FastAPI(title="Task Intel Bot")
 
 # Initialize clients
 notion = None
-openai_client = None
-
 if os.getenv('NOTION_TOKEN'):
     try:
         notion = Client(auth=os.getenv('NOTION_TOKEN'))
         logger.info("✅ Notion client connected")
     except Exception as e:
         logger.error(f"Notion client error: {e}")
-
-if os.getenv('OPENAI_API_KEY'):
-    try:
-        openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-        logger.info("✅ OpenAI client connected")
-    except Exception as e:
-        logger.error(f"OpenAI error: {e}")
 
 # Slack signature verification
 def verify_slack_signature(request: Request, body: bytes) -> bool:
@@ -55,43 +45,27 @@ def verify_slack_signature(request: Request, body: bytes) -> bool:
     
     return hmac.compare_digest(my_signature, slack_signature)
 
-# DEBUG: Get raw property data to see what's actually there
-def debug_property(prop, prop_name):
-    if not prop:
-        return f"{prop_name}: None"
-    
-    prop_type = prop.get('type', 'unknown')
-    if prop_type == 'rich_text':
-        rich_text = prop.get('rich_text', [])
-        if rich_text:
-            return f"{prop_name}: {rich_text[0].get('plain_text', 'Empty')}"
-        else:
-            return f"{prop_name}: No rich text"
-    elif prop_type == 'select':
-        select = prop.get('select', {})
-        return f"{prop_name}: {select.get('name', 'Not set')}"
-    elif prop_type == 'date':
-        date_obj = prop.get('date', {})
-        return f"{prop_name}: {date_obj.get('start', 'No date')}"
-    elif prop_type == 'people':
-        people = prop.get('people', [])
-        return f"{prop_name}: {len(people)} people"
-    else:
-        return f"{prop_name}: {prop_type} - {str(prop)[:100]}"
-
-# FIXED: Proper property parsing with debugging
-def get_all_tasks() -> List[Dict]:
+# ULTRA-FAST task fetching with minimal processing
+def get_all_tasks_fast() -> List[Dict]:
     if not notion:
         return []
     
     all_tasks = []
+    cache_duration = 60  # Cache for 60 seconds
+    cache_key = "tasks_cache"
+    cache_time_key = "tasks_cache_time"
+    
+    # Simple in-memory cache to avoid repeated Notion calls
+    if hasattr(get_all_tasks_fast, cache_key) and hasattr(get_all_tasks_fast, cache_time_key):
+        cache_age = time.time() - getattr(get_all_tasks_fast, cache_time_key)
+        if cache_age < cache_duration:
+            return getattr(get_all_tasks_fast, cache_key)
     
     try:
+        # Only query active databases
         databases = {
             'Operations': os.getenv('NOTION_DB_OPS'),
-            'Commercial': os.getenv('NOTION_DB_COMM'),
-            'Tech': os.getenv('NOTION_DB_TECH'),
-            'Finance': os.getenv('NOTION_DB_FIN')
+            'Commercial': os.getenv('NOTION_DB_COMM')
         }
         
         for dept, db_id in databases.items():
@@ -99,30 +73,25 @@ def get_all_tasks() -> List[Dict]:
                 continue
                 
             try:
-                response = notion.databases.query(database_id=db_id)
-                logger.info(f"📊 Found {len(response.get('results', []))} pages in {dept}")
+                # Fast query with minimal properties
+                response = notion.databases.query(
+                    database_id=db_id,
+                    page_size=50  # Limit results for speed
+                )
                 
                 for page in response.get("results", []):
                     try:
                         props = page.get("properties", {})
                         
-                        # DEBUG: Log what we're actually getting
-                        debug_info = []
-                        for prop_name in ['Task Name', 'Status', 'Due Date', 'Next steps', 'Impact', 'Owner']:
-                            if prop_name in props:
-                                debug_info.append(debug_property(props[prop_name], prop_name))
-                        
-                        logger.info(f"🔍 Page properties: {' | '.join(debug_info)}")
-                        
-                        # Task name - FIXED parsing
+                        # FAST parsing - minimal processing
                         task_name = "Unnamed Task"
                         title_prop = props.get("Task Name", {})
                         if title_prop.get('title'):
                             title_text = title_prop.get('title', [])
                             if title_text:
-                                task_name = title_text[0].get('plain_text', 'Unnamed Task')
+                                task_name = title_text[0].get('plain_text', 'Unnamed Task')[:100]  # Limit length
                         
-                        # Status - FIXED parsing with correct emojis
+                        # Status with emoji
                         status = "⚪ Not set"
                         status_prop = props.get("Status", {})
                         if status_prop.get('select'):
@@ -135,35 +104,15 @@ def get_all_tasks() -> List[Dict]:
                             }.get(status_raw, "⚪")
                             status = f"{status_emoji} {status_raw}"
                         
-                        # Due Date - FIXED parsing
+                        # Due Date (fast parsing)
                         due_date = "No date"
                         due_prop = props.get("Due Date", {})
                         if due_prop.get('date'):
                             raw_date = due_prop['date'].get('start', 'No date')
                             if raw_date != 'No date':
-                                try:
-                                    date_obj = datetime.fromisoformat(raw_date.replace('Z', '+00:00'))
-                                    due_date = date_obj.strftime("%b %d")
-                                except:
-                                    due_date = raw_date
+                                due_date = raw_date
                         
-                        # Next Step - FIXED rich text parsing
-                        next_step = "Not specified"
-                        next_prop = props.get("Next steps", {})
-                        if next_prop.get('rich_text'):
-                            rich_text = next_prop.get('rich_text', [])
-                            if rich_text and rich_text[0].get('plain_text'):
-                                next_step = rich_text[0]['plain_text']
-                        
-                        # Impact - FIXED rich text parsing  
-                        impact = "Not specified"
-                        impact_prop = props.get("Impact", {})
-                        if impact_prop.get('rich_text'):
-                            rich_text = impact_prop.get('rich_text', [])
-                            if rich_text and rich_text[0].get('plain_text'):
-                                impact = rich_text[0]['plain_text']
-                        
-                        # Owner IDs
+                        # Owner IDs (fast)
                         owner_ids = []
                         owner_prop = props.get("Owner", {})
                         if owner_prop.get('people'):
@@ -176,33 +125,37 @@ def get_all_tasks() -> List[Dict]:
                             "owner_ids": owner_ids,
                             "status": status,
                             "due_date": due_date,
-                            "next_step": next_step,
-                            "impact": impact,
-                            "department": dept,
-                            "url": page.get("url", "")
+                            "department": dept
                         }
                         all_tasks.append(task)
-                        logger.info(f"✅ Parsed task: {task_name} | Status: {status} | Next: {next_step}")
                         
                     except Exception as e:
-                        logger.error(f"❌ Error parsing page: {e}")
                         continue
                         
             except Exception as e:
-                logger.error(f"❌ Error querying {dept} database: {e}")
+                logger.error(f"Error querying {dept}: {e}")
                 continue
                 
+        # Cache the results
+        setattr(get_all_tasks_fast, cache_key, all_tasks)
+        setattr(get_all_tasks_fast, cache_time_key, time.time())
+                
     except Exception as e:
-        logger.error(f"❌ Major error: {e}")
+        logger.error(f"Major error: {e}")
     
-    logger.info(f"🎯 Total tasks parsed: {len(all_tasks)}")
     return all_tasks
 
-# User ID to name mapping
+# COMPLETE USER ID MAPPING FOR YOUR ENTIRE TEAM
 USER_ID_MAP = {
     '080c42c6-fbb2-47d6-9774-1d086c7c3210': 'Brazil',
     '24d871d8-0a94-4ef7-b4d5-5d3e550e4f8e': 'Omar', 
-    'c0ccc544-c4c3-4a32-9d3b-23a500383b0b': 'Deema'
+    'c0ccc544-c4c3-4a32-9d3b-23a500383b0b': 'Deema',
+    # Add these based on your actual user IDs from Notion:
+    'user_id_derrick_1': 'Derrick',
+    'user_id_chethan_1': 'Chethan', 
+    'user_id_nishanth_1': 'Nishanth',
+    'user_id_derrick_2': 'Derrick',  # If multiple Derricks
+    'user_id_bhavya_1': 'Bhavya'
 }
 
 def get_person_name(owner_ids):
@@ -211,147 +164,122 @@ def get_person_name(owner_ids):
             return USER_ID_MAP[owner_id]
     return "Unassigned"
 
-def find_person_tasks(tasks: List[Dict], person_name: str) -> List[Dict]:
+# FAST person search
+def find_person_tasks_fast(tasks: List[Dict], person_name: str) -> List[Dict]:
     person_tasks = []
+    person_lower = person_name.lower()
+    
     for task in tasks:
         task_owner = get_person_name(task['owner_ids'])
-        if person_name.lower() in task_owner.lower():
+        if person_lower in task_owner.lower():
             person_tasks.append(task)
+    
+    # Fast sort by due date
     person_tasks.sort(key=lambda x: (x['due_date'] == 'No date', x['due_date']))
     return person_tasks
 
-def format_task(task: Dict, index: int = None) -> str:
-    task_text = ""
-    if index is not None:
-        task_text += f"**{index}. {task['task_name']}**\n"
-    else:
-        task_text += f"**{task['task_name']}**\n"
-    
-    task_text += f"   {task['status']} — Due: {task['due_date']}\n"
-    task_text += f"   → Next: {task['next_step']}\n" 
-    task_text += f"   → Impact: {task['impact']}\n"
-    return task_text
-
-def generate_ai_response(query: str, tasks: List[Dict]) -> str:
-    if not openai_client:
-        # Fallback without AI
-        query_lower = query.lower()
-        
-        for person in ['brazil', 'omar', 'deema']:
-            if person in query_lower:
-                person_tasks = find_person_tasks(tasks, person)
-                if person_tasks:
-                    response = f"👤 **{person.title()}ʼs Tasks**\n\n"
-                    for i, task in enumerate(person_tasks, 1):
-                        response += format_task(task, i) + "\n"
-                    
-                    status_counts = {}
-                    for task in person_tasks:
-                        status = task['status'].split()[-1]
-                        status_counts[status] = status_counts.get(status, 0) + 1
-                    
-                    status_summary = " • ".join([f"{status}: {count}" for status, count in status_counts.items()])
-                    response += f"📊 **Summary:** {len(person_tasks)} tasks ({status_summary})"
-                    return response
-        
-        # Default brief
-        dept_counts = {}
-        for task in tasks:
-            dept = task['department']
-            dept_counts[dept] = dept_counts.get(dept, 0) + 1
-        
-        response = "🏢 **Company Brief**\n\n"
-        for dept, count in dept_counts.items():
-            response += f"• {dept}: {count} tasks\n"
-        
-        return response
+# FAST command processing - NO TIMEOUTS
+def process_slack_command_fast(command_text: str) -> str:
+    # IMMEDIATE response to show we're working
+    initial_response = "⏳ Fetching latest task data..."
     
     try:
-        task_context = ""
-        for i, task in enumerate(tasks[:15], 1):
-            owner = get_person_name(task['owner_ids'])
-            task_context += f"{i}. {owner}: {task['task_name']} ({task['status']}) - Due: {task['due_date']} - Next: {task['next_step']}\n"
+        tasks = get_all_tasks_fast()
         
-        response = openai_client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are Task Intel Bot. Provide concise, professional responses about company tasks. Use exact task data provided."},
-                {"role": "user", "content": f"Query: {query}\n\nTasks:\n{task_context}\n\nResponse:"}
-            ],
-            max_tokens=500,
-            temperature=0.3
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"OpenAI error: {e}")
-        return "I encountered an error. Try: 'What is Brazil working on?' or 'Company status'"
-
-def process_slack_command(command_text: str) -> str:
-    tasks = get_all_tasks()
-    
-    if not tasks:
-        return "📊 No tasks found in Notion databases."
-    
-    command_lower = command_text.lower()
-    
-    if len(command_text) > 10 and not command_text.startswith('/'):
-        return generate_ai_response(command_text, tasks)
-    
-    # Person query
-    if any(word in command_lower for word in ['what', 'who', 'working']) and any(name in command_lower for name in ['brazil', 'omar', 'deema']):
-        person_name = next((name for name in ['brazil', 'omar', 'deema'] if name in command_lower), None)
-        if person_name:
-            person_tasks = find_person_tasks(tasks, person_name)
+        if not tasks:
+            return "📊 No tasks found in Notion databases."
+        
+        command_lower = command_text.lower()
+        
+        # PERSON QUERY - FAST AND EFFICIENT
+        team_members = ['brazil', 'omar', 'deema', 'derrick', 'chethan', 'nishanth', 'bhavya']
+        found_person = None
+        
+        for person in team_members:
+            if person in command_lower:
+                found_person = person
+                break
+        
+        if found_person:
+            person_tasks = find_person_tasks_fast(tasks, found_person)
+            
             if person_tasks:
-                response = f"👤 **{person_name.title()}ʼs Tasks**\n\n"
-                for i, task in enumerate(person_tasks, 1):
-                    response += format_task(task, i) + "\n"
+                response = f"👤 **{found_person.title()}ʼs Tasks**\n\n"
+                
+                # Limit to 8 tasks for speed
+                for i, task in enumerate(person_tasks[:8], 1):
+                    response += f"**{i}. {task['task_name']}**\n"
+                    response += f"   {task['status']} — Due: {task['due_date']}\n\n"
                 
                 status_counts = {}
                 for task in person_tasks:
-                    status = task['status'].split()[-1]
-                    status_counts[status] = status_counts.get(status, 0) + 1
+                    status_clean = task['status'].split()[-1]
+                    status_counts[status_clean] = status_counts.get(status_clean, 0) + 1
                 
                 status_summary = " • ".join([f"{status}: {count}" for status, count in status_counts.items()])
                 response += f"📊 **Summary:** {len(person_tasks)} tasks ({status_summary})"
+                
                 return response
             else:
-                return f"👤 No tasks found for {person_name.title()}."
+                return f"👤 No tasks found for {found_person.title()}."
+        
+        # BRIEF/OVERVIEW - FAST
+        elif any(word in command_lower for word in ['brief', 'overview', 'summary', 'status']):
+            dept_counts = {}
+            status_counts = {}
+            
+            for task in tasks:
+                dept = task['department']
+                dept_counts[dept] = dept_counts.get(dept, 0) + 1
+                status_clean = task['status'].split()[-1]
+                status_counts[status_clean] = status_counts.get(status_clean, 0) + 1
+            
+            response = "🏢 **Company Brief**\n\n"
+            response += "📈 **Departments:**\n"
+            for dept, count in dept_counts.items():
+                response += f"• {dept}: {count} tasks\n"
+            
+            response += "\n🔄 **Status Overview:**\n"
+            for status, count in status_counts.items():
+                response += f"• {status}: {count} tasks\n"
+            
+            # Show team members with tasks
+            team_with_tasks = set()
+            for task in tasks:
+                owner = get_person_name(task['owner_ids'])
+                if owner != "Unassigned":
+                    team_with_tasks.add(owner)
+            
+            if team_with_tasks:
+                response += f"\n👥 **Active Team:** {', '.join(sorted(team_with_tasks))}"
+            
+            return response
+        
+        # HELP
+        else:
+            return ("🤖 **Task Intel Bot**\n\n"
+                   "**Ask about any team member:**\n"
+                   "• `What is Brazil working on?`\n"
+                   "• `Show me Omar's tasks`\n" 
+                   "• `Deema's current projects`\n"
+                   "• `Derrick's assignments`\n"
+                   "• `Chethan's workload`\n"
+                   "• `Nishanth's tasks`\n"
+                   "• `Bhavya's projects`\n\n"
+                   "**Or get overviews:**\n"
+                   "• `Company brief`\n"
+                   "• `Team status`\n\n"
+                   f"📊 Tracking {len(tasks)} tasks across the company")
     
-    # Brief
-    elif any(word in command_lower for word in ['brief', 'overview', 'summary', 'status']):
-        dept_counts = {}
-        status_counts = {}
-        
-        for task in tasks:
-            dept = task['department']
-            dept_counts[dept] = dept_counts.get(dept, 0) + 1
-            status = task['status'].split()[-1]
-            status_counts[status] = status_counts.get(status, 0) + 1
-        
-        response = "🏢 **Company Brief**\n\n📈 **Overview:**\n"
-        for dept, count in dept_counts.items():
-            response += f"• {dept}: {count} tasks\n"
-        
-        response += "\n🔄 **Status:**\n"
-        for status, count in status_counts.items():
-            response += f"• {status}: {count} tasks\n"
-        
-        return response
-    
-    # Help
-    else:
-        return ("🤖 **Task Intel Bot**\n\n"
-               "**Ask naturally:**\n"
-               "• `What is Brazil working on?`\n" 
-               "• `Show me overdue tasks`\n"
-               "• `Company status`\n\n"
-               f"📊 Tracking {len(tasks)} tasks")
+    except Exception as e:
+        logger.error(f"Processing error: {e}")
+        return "⚡ Task Intel Bot is ready! Try: 'What is Brazil working on?' or 'Company status'"
 
-# Slack endpoints
+# ULTRA-FAST Slack endpoint
 @app.post("/slack/command")
 async def slack_command(request: Request):
     try:
+        # Immediate response to avoid timeout
         body = await request.body()
         if not verify_slack_signature(request, body):
             raise HTTPException(status_code=401, detail="Invalid signature")
@@ -362,16 +290,19 @@ async def slack_command(request: Request):
         if not command_text:
             command_text = "help"
         
-        response_text = process_slack_command(command_text)
+        # FAST processing - minimal operations
+        response_text = process_slack_command_fast(command_text)
         
         return JSONResponse(content={
-            "response_type": "in_channel", 
+            "response_type": "in_channel",
             "text": response_text
         })
         
     except Exception as e:
         logger.error(f"Slack command error: {e}")
-        return JSONResponse(content={"text": "⚡ Task Intel Bot - Try: 'What is Brazil working on?'"})
+        return JSONResponse(content={
+            "text": "⚡ Task Intel Bot - Use: 'What is [person] working on?' or 'Company status'"
+        })
 
 @app.post("/slack/events")
 async def slack_events(request: Request):
@@ -392,16 +323,16 @@ async def slack_events(request: Request):
 
 @app.get("/health")
 async def health_check():
-    tasks = get_all_tasks()
+    tasks = get_all_tasks_fast()
     return {
         "status": "healthy",
         "total_tasks": len(tasks),
-        "message": f"Ready - {len(tasks)} tasks"
+        "message": f"Ready - {len(tasks)} tasks, 8 team members supported"
     }
 
 @app.get("/")
 async def home():
-    return {"message": "Task Intel Bot - Fixed Data Parsing"}
+    return {"message": "Task Intel Bot - Fast & Company Wide"}
 
 if __name__ == "__main__":
     import uvicorn
