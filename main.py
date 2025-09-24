@@ -60,6 +60,123 @@ async def health_check():
         "mode": "conversational"
     }
 
+@app.get("/debug/user-mapping")
+async def debug_user_mapping():
+    """Debug endpoint to see user IDs and their tasks"""
+    try:
+        tasks = await get_all_tasks_with_raw_data()
+        
+        # Group tasks by user ID
+        user_tasks = {}
+        for task in tasks:
+            for owner in task['raw_owners']:
+                user_id = owner.get('id', 'unknown')
+                user_name = owner.get('name', 'No name')
+                
+                if user_id not in user_tasks:
+                    user_tasks[user_id] = {
+                        'name': user_name,
+                        'tasks': [],
+                        'task_count': 0
+                    }
+                
+                user_tasks[user_id]['tasks'].append({
+                    'task_name': task['name'],
+                    'department': task['department'],
+                    'status': task['status']
+                })
+                user_tasks[user_id]['task_count'] += 1
+        
+        return {
+            "total_tasks": len(tasks),
+            "user_mapping": user_tasks,
+            "all_user_ids": list(user_tasks.keys())
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+async def get_all_tasks_with_raw_data() -> List[Dict]:
+    """Get tasks with raw user data for debugging"""
+    cache_key = "raw_tasks"
+    if cache_key in cache:
+        return cache[cache_key]
+    
+    tasks = []
+    if not notion:
+        return tasks
+    
+    # Fetch all databases
+    for dept, db_id in DATABASES.items():
+        if db_id:
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: notion.databases.query(database_id=db_id, page_size=100)
+                )
+                
+                for page in result.get('results', []):
+                    task = parse_task_with_raw_owners(page, dept)
+                    if task:
+                        tasks.append(task)
+                        
+            except Exception as e:
+                logger.error(f"Error fetching {dept}: {e}")
+    
+    cache[cache_key] = tasks
+    return tasks
+
+def parse_task_with_raw_owners(page: Dict, department: str) -> Optional[Dict]:
+    """Parse task with raw owner data for debugging"""
+    try:
+        props = page.get('properties', {})
+        
+        # Get task name
+        name = get_property(props, 'Task Name', 'title')
+        if not name or name == 'No name':
+            return None
+        
+        # Get raw owner data (exactly what Notion returns)
+        raw_owners = props.get('Owner', {}).get('people', [])
+        
+        due_date_raw = props.get('Due Date', {}).get('date', {}).get('start')
+        
+        return {
+            'name': name,
+            'raw_owners': raw_owners,  # Keep raw data for debugging
+            'owners': [owner.get('name') or f"user_{owner.get('id', '')[-6:]}" for owner in raw_owners],
+            'status': get_property(props, 'Status', 'select'),
+            'due_date': due_date_raw.split('T')[0] if due_date_raw else 'Not scheduled',
+            'next_step': get_property(props, 'Next Steps', 'rich_text'),
+            'blocker': get_property(props, 'Blocker', 'select'),
+            'impact': get_property(props, 'Impact', 'rich_text'),
+            'priority': get_property(props, 'Priority', 'select'),
+            'department': department,
+        }
+        
+    except Exception as e:
+        logger.error(f"Error parsing task: {e}")
+        return None
+
+def get_property(props, field_name: str, field_type: str) -> str:
+    """Extract property value from Notion"""
+    field = props.get(field_name, {})
+    
+    if field_type == 'title':
+        titles = field.get('title', [])
+        return titles[0].get('plain_text', '') if titles else ''
+    elif field_type == 'select':
+        select = field.get('select', {})
+        return select.get('name', 'Not set')
+    elif field_type == 'date':
+        date_obj = field.get('date', {})
+        return date_obj.get('start', 'No date')
+    elif field_type == 'rich_text':
+        rich_text = field.get('rich_text', [])
+        return rich_text[0].get('plain_text', '') if rich_text else ''
+    
+    return ''
+
+# ... (rest of your existing functions remain the same - understand_ceo_query, generate_conversational_response, etc.)
+
 async def understand_ceo_query(query: str) -> Dict:
     """Understand what the CEO/COO is asking in natural language"""
     if not query:
@@ -156,25 +273,6 @@ def parse_task_naturally(page: Dict, department: str) -> Optional[Dict]:
     except Exception as e:
         logger.error(f"Error parsing task: {e}")
         return None
-
-def get_property(props, field_name: str, field_type: str) -> str:
-    """Extract property value from Notion"""
-    field = props.get(field_name, {})
-    
-    if field_type == 'title':
-        titles = field.get('title', [])
-        return titles[0].get('plain_text', '') if titles else ''
-    elif field_type == 'select':
-        select = field.get('select', {})
-        return select.get('name', 'Not set')
-    elif field_type == 'date':
-        date_obj = field.get('date', {})
-        return date_obj.get('start', 'No date')
-    elif field_type == 'rich_text':
-        rich_text = field.get('rich_text', [])
-        return rich_text[0].get('plain_text', '') if rich_text else ''
-    
-    return ''
 
 def generate_conversational_response(tasks: List[Dict], analysis: Dict, original_query: str) -> str:
     """Generate a human-like response instead of robot columns"""
