@@ -35,22 +35,24 @@ try:
     from notion_client import Client
     notion_token = os.getenv('NOTION_TOKEN')
     if notion_token:
-        notion = Client(auth=notion_token, timeout=10)
+        notion = Client(auth=notion_token, timeout_ms=10000)  # FIXED: timeout_ms instead of timeout
         logger.info("Notion client initialized successfully")
     else:
         logger.warning("NOTION_TOKEN not set - Notion features disabled")
 except ImportError:
     logger.warning("notion-client package not installed")
+except Exception as e:
+    logger.error(f"Notion client init failed: {e}")
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    return """
+    return f"""
     <html>
         <head>
             <title>Task Intel Bot</title>
             <style>
-                body { font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; }
-                .status { background: #f0f8ff; padding: 20px; border-radius: 8px; }
+                body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; }}
+                .status {{ background: #f0f8ff; padding: 20px; border-radius: 8px; }}
             </style>
         </head>
         <body>
@@ -58,18 +60,14 @@ async def home():
                 <h1>🤖 Task Intel Bot</h1>
                 <p>Status: <strong>Ready</strong></p>
                 <p>This service powers Slack commands for task management queries.</p>
-                <p>Environment: {}</p>
-                <p>Team Members: {}</p>
-                <p>Databases configured: {}</p>
+                <p>Environment: {'Production' if os.getenv('RENDER', False) else 'Development'}</p>
+                <p>Team Members: {", ".join(COMPANY_TEAM)}</p>
+                <p>Databases configured: {sum(1 for db_id in DATABASES.values() if db_id)}</p>
                 <p><a href="/health">Health Check</a> | <a href="/docs">API Docs</a></p>
             </div>
         </body>
     </html>
-    """.format(
-        "Production" if os.getenv('RENDER', False) else "Development",
-        ", ".join(COMPANY_TEAM),
-        sum(1 for db_id in DATABASES.values() if db_id)
-    )
+    """
 
 @app.get("/health")
 async def health_check():
@@ -167,8 +165,7 @@ async def fetch_notion_database(db_id: str, dept: str) -> List[Dict]:
             None, 
             lambda: notion.databases.query(
                 database_id=db_id, 
-                page_size=100,
-                filter={"property": "Status", "select": {"is_not_empty": True}}
+                page_size=100
             )
         )
         
@@ -462,7 +459,7 @@ def filter_tasks_by_timeframe(tasks: List[Dict], timeframe: str) -> List[Dict]:
             continue
             
         try:
-            # Parse date from string (format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS.ZZZZ)
+            # Parse date from string
             if 'T' in due_date_str:
                 due_date = datetime.fromisoformat(due_date_str.replace('Z', '+00:00')).date()
             else:
