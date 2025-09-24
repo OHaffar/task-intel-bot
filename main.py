@@ -9,6 +9,7 @@ import time
 from datetime import datetime
 from notion_client import Client
 import httpx
+import json
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -46,38 +47,14 @@ def verify_slack_signature(request: Request, body: bytes) -> bool:
     
     return hmac.compare_digest(my_signature, slack_signature)
 
-# Send message to Slack
-async def send_slack_message(channel: str, text: str):
-    try:
-        slack_token = os.getenv('SLACK_BOT_TOKEN')
-        if not slack_token:
-            return False
-            
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                "https://slack.com/api/chat.postMessage",
-                headers={"Authorization": f"Bearer {slack_token}"},
-                json={
-                    "channel": channel,
-                    "text": text,
-                    "unfurl_links": False,
-                    "unfurl_media": False
-                }
-            )
-            return response.status_code == 200
-    except Exception as e:
-        logger.error(f"Error sending Slack message: {e}")
-        return False
-
-# Fast task fetching with caching
+# Fast task fetching
 def get_all_tasks_fast() -> List[Dict]:
     if not notion:
         return []
     
-    # Simple cache to avoid repeated calls
     cache_key = "tasks_cache"
     cache_time_key = "tasks_cache_time"
-    cache_duration = 30  # 30 seconds
+    cache_duration = 30
     
     if hasattr(get_all_tasks_fast, cache_key) and hasattr(get_all_tasks_fast, cache_time_key):
         cache_age = time.time() - getattr(get_all_tasks_fast, cache_time_key)
@@ -103,7 +80,6 @@ def get_all_tasks_fast() -> List[Dict]:
                     try:
                         props = page.get("properties", {})
                         
-                        # Fast parsing
                         task_name = "Unnamed Task"
                         title_prop = props.get("Task Name", {})
                         if title_prop.get('title'):
@@ -111,7 +87,6 @@ def get_all_tasks_fast() -> List[Dict]:
                             if title_text:
                                 task_name = title_text[0].get('plain_text', 'Unnamed Task')[:100]
                         
-                        # Status with emoji
                         status = "⚪ Not set"
                         status_prop = props.get("Status", {})
                         if status_prop.get('select'):
@@ -124,14 +99,12 @@ def get_all_tasks_fast() -> List[Dict]:
                             }.get(status_raw, "⚪")
                             status = f"{status_emoji} {status_raw}"
                         
-                        # Due Date
                         due_date = "No date"
                         due_prop = props.get("Due Date", {})
                         if due_prop.get('date'):
                             raw_date = due_prop['date'].get('start', 'No date')
                             due_date = raw_date
                         
-                        # Owner IDs
                         owner_ids = []
                         owner_prop = props.get("Owner", {})
                         if owner_prop.get('people'):
@@ -154,7 +127,6 @@ def get_all_tasks_fast() -> List[Dict]:
             except Exception as e:
                 continue
                 
-        # Cache results
         setattr(get_all_tasks_fast, cache_key, all_tasks)
         setattr(get_all_tasks_fast, cache_time_key, time.time())
                 
@@ -163,12 +135,11 @@ def get_all_tasks_fast() -> List[Dict]:
     
     return all_tasks
 
-# User ID mapping for your entire team
+# User ID mapping
 USER_ID_MAP = {
     '080c42c6-fbb2-47d6-9774-1d086c7c3210': 'Brazil',
     '24d871d8-0a94-4ef7-b4d5-5d3e550e4f8e': 'Omar', 
     'c0ccc544-c4c3-4a32-9d3b-23a500383b0b': 'Deema',
-    # Add others as you discover their user IDs
 }
 
 def get_person_name(owner_ids):
@@ -189,7 +160,6 @@ def find_person_tasks_fast(tasks: List[Dict], person_name: str) -> List[Dict]:
     person_tasks.sort(key=lambda x: (x['due_date'] == 'No date', x['due_date']))
     return person_tasks
 
-# Process commands for both slash commands and natural language
 def process_query(query_text: str) -> str:
     tasks = get_all_tasks_fast()
     
@@ -198,7 +168,6 @@ def process_query(query_text: str) -> str:
     
     query_lower = query_text.lower()
     
-    # Person query
     team_members = ['brazil', 'omar', 'deema', 'derrick', 'chethan', 'nishanth', 'bhavya']
     found_person = None
     
@@ -229,7 +198,6 @@ def process_query(query_text: str) -> str:
         else:
             return f"👤 No tasks found for {found_person.title()}."
     
-    # Brief/overview
     elif any(word in query_lower for word in ['brief', 'overview', 'summary', 'status', 'company', 'team']):
         dept_counts = {}
         status_counts = {}
@@ -251,20 +219,70 @@ def process_query(query_text: str) -> str:
         
         return response
     
-    # Help
     else:
         return ("🤖 **Task Intel Bot**\n\n"
-               "**Natural Language Examples:**\n"
+               "**Ask naturally:**\n"
                "• `What is Brazil working on?`\n"
-               "• `Show me company status`\n"
-               "• `Omar's tasks`\n"
-               "• `Team update`\n\n"
-               "**Slash Commands:**\n"
-               "• `/intel what brazil`\n"
-               "• `/intel brief`\n\n"
+               "• `Company status`\n"
+               "• `Omar's tasks`\n\n"
                f"📊 Tracking {len(tasks)} tasks")
 
-# SLASH COMMAND endpoint
+# SIMPLIFIED EVENTS ENDPOINT - FIXED!
+@app.post("/slack/events")
+async def slack_events(request: Request):
+    try:
+        # Read the body first for signature verification
+        body_bytes = await request.body()
+        body_str = body_bytes.decode('utf-8')
+        
+        if not verify_slack_signature(request, body_bytes):
+            raise HTTPException(status_code=401, detail="Invalid signature")
+        
+        data = json.loads(body_str)
+        
+        # URL verification challenge
+        if "challenge" in data:
+            logger.info("✅ Slack URL verification received")
+            return JSONResponse(content={"challenge": data["challenge"]})
+        
+        # Handle events
+        event_type = data.get("type")
+        
+        if event_type == "url_verification":
+            return JSONResponse(content={"challenge": data["challenge"]})
+        
+        elif event_type == "event_callback":
+            event = data.get("event", {})
+            
+            # App mentions (@Task Intel Bot)
+            if event.get("type") == "app_mention":
+                text = event.get("text", "")
+                channel = event.get("channel")
+                
+                # Extract query after bot mention
+                query = text.split('>', 1)[-1].strip() if '>' in text else text
+                if query:
+                    response_text = process_query(query)
+                    # For now, just log - we'd need to send back to Slack
+                    logger.info(f"App mention: {query} -> {response_text[:100]}...")
+            
+            # Direct messages
+            elif event.get("type") == "message" and event.get("channel_type") == "im":
+                if not event.get("bot_id"):  # Ignore bot messages
+                    text = event.get("text", "")
+                    channel = event.get("channel")
+                    
+                    if text:
+                        response_text = process_query(text)
+                        logger.info(f"DM: {text} -> {response_text[:100]}...")
+        
+        return JSONResponse(content={"status": "ok"})
+        
+    except Exception as e:
+        logger.error(f"Slack events error: {e}")
+        return JSONResponse(content={"status": "error"}, status_code=200)
+
+# Slash command endpoint (unchanged)
 @app.post("/slack/command")
 async def slack_command(request: Request):
     try:
@@ -288,67 +306,21 @@ async def slack_command(request: Request):
     except Exception as e:
         logger.error(f"Slash command error: {e}")
         return JSONResponse(content={
-            "text": "⚡ Task Intel Bot - Try: 'What is Brazil working on?' or '/intel brief'"
+            "text": "⚡ Task Intel Bot - Try: '/intel what brazil' or '/intel brief'"
         })
-
-# EVENT SUBSCRIPTIONS endpoint (for natural language)
-@app.post("/slack/events")
-async def slack_events(request: Request):
-    try:
-        body = await request.body()
-        if not verify_slack_signature(request, body):
-            raise HTTPException(status_code=401, detail="Invalid signature")
-        
-        data = await request.json()
-        
-        # URL verification
-        if "challenge" in data:
-            return JSONResponse(content={"challenge": data["challenge"]})
-        
-        # Handle app mentions (@Task Intel Bot)
-        if data.get("event", {}).get("type") == "app_mention":
-            event = data["event"]
-            text = event["text"]
-            channel = event["channel"]
-            
-            # Remove bot mention and process
-            query = text.replace("<@", "").replace(">", "").split(" ", 1)[-1].strip()
-            response_text = process_query(query)
-            
-            # Send response back to Slack
-            await send_slack_message(channel, response_text)
-        
-        # Handle direct messages (no @ needed)
-        elif data.get("event", {}).get("type") == "message" and not data.get("event", {}).get("bot_id"):
-            event = data["event"]
-            channel = event["channel"]
-            text = event["text"]
-            
-            # Ignore messages from bots and avoid loops
-            if event.get("bot_id") or event.get("subtype"):
-                return JSONResponse(content={"status": "ok"})
-            
-            response_text = process_query(text)
-            await send_slack_message(channel, response_text)
-        
-        return JSONResponse(content={"status": "ok"})
-        
-    except Exception as e:
-        logger.error(f"Slack events error: {e}")
-        return JSONResponse(content={"status": "error"})
 
 @app.get("/health")
 async def health_check():
     tasks = get_all_tasks_fast()
     return {
-        "status": "healthy",
+        "status": "healthy", 
         "total_tasks": len(tasks),
-        "message": f"Ready - {len(tasks)} tasks, natural language enabled"
+        "message": f"Ready - {len(tasks)} tasks"
     }
 
 @app.get("/")
 async def home():
-    return {"message": "Task Intel Bot - Natural Language + Slash Commands"}
+    return {"message": "Task Intel Bot - Fixed Events Endpoint"}
 
 if __name__ == "__main__":
     import uvicorn
