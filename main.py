@@ -55,7 +55,31 @@ def verify_slack_signature(request: Request, body: bytes) -> bool:
     
     return hmac.compare_digest(my_signature, slack_signature)
 
-# Get all tasks with proper formatting
+# DEBUG: Get raw property data to see what's actually there
+def debug_property(prop, prop_name):
+    if not prop:
+        return f"{prop_name}: None"
+    
+    prop_type = prop.get('type', 'unknown')
+    if prop_type == 'rich_text':
+        rich_text = prop.get('rich_text', [])
+        if rich_text:
+            return f"{prop_name}: {rich_text[0].get('plain_text', 'Empty')}"
+        else:
+            return f"{prop_name}: No rich text"
+    elif prop_type == 'select':
+        select = prop.get('select', {})
+        return f"{prop_name}: {select.get('name', 'Not set')}"
+    elif prop_type == 'date':
+        date_obj = prop.get('date', {})
+        return f"{prop_name}: {date_obj.get('start', 'No date')}"
+    elif prop_type == 'people':
+        people = prop.get('people', [])
+        return f"{prop_name}: {len(people)} people"
+    else:
+        return f"{prop_name}: {prop_type} - {str(prop)[:100]}"
+
+# FIXED: Proper property parsing with debugging
 def get_all_tasks() -> List[Dict]:
     if not notion:
         return []
@@ -76,67 +100,76 @@ def get_all_tasks() -> List[Dict]:
                 
             try:
                 response = notion.databases.query(database_id=db_id)
+                logger.info(f"📊 Found {len(response.get('results', []))} pages in {dept}")
                 
                 for page in response.get("results", []):
                     try:
                         props = page.get("properties", {})
                         
-                        # Task name
+                        # DEBUG: Log what we're actually getting
+                        debug_info = []
+                        for prop_name in ['Task Name', 'Status', 'Due Date', 'Next steps', 'Impact', 'Owner']:
+                            if prop_name in props:
+                                debug_info.append(debug_property(props[prop_name], prop_name))
+                        
+                        logger.info(f"🔍 Page properties: {' | '.join(debug_info)}")
+                        
+                        # Task name - FIXED parsing
                         task_name = "Unnamed Task"
                         title_prop = props.get("Task Name", {})
-                        if title_prop and title_prop.get("title"):
-                            title_text = title_prop.get("title", [])
+                        if title_prop.get('title'):
+                            title_text = title_prop.get('title', [])
                             if title_text:
-                                task_name = title_text[0].get("plain_text", "Unnamed Task")
+                                task_name = title_text[0].get('plain_text', 'Unnamed Task')
                         
-                        # Owner IDs
-                        owner_ids = []
-                        owner_prop = props.get("Owner", {})
-                        if owner_prop and owner_prop.get("people"):
-                            for person in owner_prop["people"]:
-                                if person and person.get("id"):
-                                    owner_ids.append(person["id"])
-                        
-                        # Status with CORRECT emojis
-                        status = "Not set"
+                        # Status - FIXED parsing with correct emojis
+                        status = "⚪ Not set"
                         status_prop = props.get("Status", {})
-                        if status_prop and status_prop.get("select"):
-                            status_raw = status_prop["select"].get("name", "Not set")
+                        if status_prop.get('select'):
+                            status_raw = status_prop['select'].get('name', 'Not set')
                             status_emoji = {
-                                "In Progress": "🔵",  # BLUE for In Progress
-                                "To-Do": "🟡",        # Yellow for To-Do
-                                "Blocked": "🔴",      # Red for Blocked
-                                "Done": "✅"          # Green check for Done
+                                "In Progress": "🔵",
+                                "To-Do": "🟡", 
+                                "Blocked": "🔴",
+                                "Done": "✅"
                             }.get(status_raw, "⚪")
                             status = f"{status_emoji} {status_raw}"
                         
-                        # Due Date
+                        # Due Date - FIXED parsing
                         due_date = "No date"
                         due_prop = props.get("Due Date", {})
-                        if due_prop and due_prop.get("date"):
-                            raw_date = due_prop["date"].get("start", "No date")
-                            if raw_date != "No date":
+                        if due_prop.get('date'):
+                            raw_date = due_prop['date'].get('start', 'No date')
+                            if raw_date != 'No date':
                                 try:
                                     date_obj = datetime.fromisoformat(raw_date.replace('Z', '+00:00'))
                                     due_date = date_obj.strftime("%b %d")
                                 except:
                                     due_date = raw_date
                         
-                        # Next Step
+                        # Next Step - FIXED rich text parsing
                         next_step = "Not specified"
                         next_prop = props.get("Next steps", {})
-                        if next_prop and next_prop.get("rich_text"):
-                            rich_text = next_prop.get("rich_text", [])
-                            if rich_text:
-                                next_step = rich_text[0].get("plain_text", "Not specified")
+                        if next_prop.get('rich_text'):
+                            rich_text = next_prop.get('rich_text', [])
+                            if rich_text and rich_text[0].get('plain_text'):
+                                next_step = rich_text[0]['plain_text']
                         
-                        # Impact
+                        # Impact - FIXED rich text parsing  
                         impact = "Not specified"
                         impact_prop = props.get("Impact", {})
-                        if impact_prop and impact_prop.get("rich_text"):
-                            rich_text = impact_prop.get("rich_text", [])
-                            if rich_text:
-                                impact = rich_text[0].get("plain_text", "Not specified")
+                        if impact_prop.get('rich_text'):
+                            rich_text = impact_prop.get('rich_text', [])
+                            if rich_text and rich_text[0].get('plain_text'):
+                                impact = rich_text[0]['plain_text']
+                        
+                        # Owner IDs
+                        owner_ids = []
+                        owner_prop = props.get("Owner", {})
+                        if owner_prop.get('people'):
+                            for person in owner_prop['people']:
+                                if person and person.get('id'):
+                                    owner_ids.append(person['id'])
                         
                         task = {
                             "task_name": task_name,
@@ -149,24 +182,27 @@ def get_all_tasks() -> List[Dict]:
                             "url": page.get("url", "")
                         }
                         all_tasks.append(task)
+                        logger.info(f"✅ Parsed task: {task_name} | Status: {status} | Next: {next_step}")
                         
                     except Exception as e:
+                        logger.error(f"❌ Error parsing page: {e}")
                         continue
                         
             except Exception as e:
+                logger.error(f"❌ Error querying {dept} database: {e}")
                 continue
                 
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.error(f"❌ Major error: {e}")
     
+    logger.info(f"🎯 Total tasks parsed: {len(all_tasks)}")
     return all_tasks
 
-# User ID to name mapping (ONLY REAL PEOPLE)
+# User ID to name mapping
 USER_ID_MAP = {
     '080c42c6-fbb2-47d6-9774-1d086c7c3210': 'Brazil',
-    '24d871d8-0a94-4ef7-b4d5-5d3e550e4f8e': 'Omar',
-    'c0ccc544-c4c3-4a32-9d3b-23a500383b0b': 'Deema',
-    'ff3909f8-9fa8-4013-9d12-c1e86f8ebffe': 'Team Member'  # Generic for others
+    '24d871d8-0a94-4ef7-b4d5-5d3e550e4f8e': 'Omar', 
+    'c0ccc544-c4c3-4a32-9d3b-23a500383b0b': 'Deema'
 }
 
 def get_person_name(owner_ids):
@@ -175,20 +211,15 @@ def get_person_name(owner_ids):
             return USER_ID_MAP[owner_id]
     return "Unassigned"
 
-# Find tasks by person
 def find_person_tasks(tasks: List[Dict], person_name: str) -> List[Dict]:
     person_tasks = []
-    
     for task in tasks:
         task_owner = get_person_name(task['owner_ids'])
         if person_name.lower() in task_owner.lower():
             person_tasks.append(task)
-    
-    # Sort by due date (soonest first)
     person_tasks.sort(key=lambda x: (x['due_date'] == 'No date', x['due_date']))
     return person_tasks
 
-# Format task for display
 def format_task(task: Dict, index: int = None) -> str:
     task_text = ""
     if index is not None:
@@ -197,45 +228,33 @@ def format_task(task: Dict, index: int = None) -> str:
         task_text += f"**{task['task_name']}**\n"
     
     task_text += f"   {task['status']} — Due: {task['due_date']}\n"
-    task_text += f"   → Next: {task['next_step']}\n"
+    task_text += f"   → Next: {task['next_step']}\n" 
     task_text += f"   → Impact: {task['impact']}\n"
-    
     return task_text
 
-# AI-powered response for natural language
 def generate_ai_response(query: str, tasks: List[Dict]) -> str:
     if not openai_client:
-        # Fallback to basic response without AI
+        # Fallback without AI
         query_lower = query.lower()
         
-        if 'brazil' in query_lower:
-            person_tasks = find_person_tasks(tasks, 'brazil')
-            if person_tasks:
-                response = f"👤 **Brazilʼs Tasks**\n\n"
-                for i, task in enumerate(person_tasks, 1):
-                    response += format_task(task, i) + "\n"
-                response += f"📊 **Summary:** {len(person_tasks)} tasks assigned to Brazil"
-                return response
+        for person in ['brazil', 'omar', 'deema']:
+            if person in query_lower:
+                person_tasks = find_person_tasks(tasks, person)
+                if person_tasks:
+                    response = f"👤 **{person.title()}ʼs Tasks**\n\n"
+                    for i, task in enumerate(person_tasks, 1):
+                        response += format_task(task, i) + "\n"
+                    
+                    status_counts = {}
+                    for task in person_tasks:
+                        status = task['status'].split()[-1]
+                        status_counts[status] = status_counts.get(status, 0) + 1
+                    
+                    status_summary = " • ".join([f"{status}: {count}" for status, count in status_counts.items()])
+                    response += f"📊 **Summary:** {len(person_tasks)} tasks ({status_summary})"
+                    return response
         
-        elif 'omar' in query_lower:
-            person_tasks = find_person_tasks(tasks, 'omar')
-            if person_tasks:
-                response = f"👤 **Omarʼs Tasks**\n\n"
-                for i, task in enumerate(person_tasks, 1):
-                    response += format_task(task, i) + "\n"
-                response += f"📊 **Summary:** {len(person_tasks)} tasks assigned to Omar"
-                return response
-        
-        elif 'deema' in query_lower:
-            person_tasks = find_person_tasks(tasks, 'deema')
-            if person_tasks:
-                response = f"👤 **Deemaʼs Tasks**\n\n"
-                for i, task in enumerate(person_tasks, 1):
-                    response += format_task(task, i) + "\n"
-                response += f"📊 **Summary:** {len(person_tasks)} tasks assigned to Deema"
-                return response
-        
-        # Default brief for other queries
+        # Default brief
         dept_counts = {}
         for task in tasks:
             dept = task['department']
@@ -245,79 +264,61 @@ def generate_ai_response(query: str, tasks: List[Dict]) -> str:
         for dept, count in dept_counts.items():
             response += f"• {dept}: {count} tasks\n"
         
-        return response + f"\n💡 Try: 'What is Brazil working on?' or 'Omar's tasks'"
+        return response
     
     try:
-        # Prepare task context
         task_context = ""
         for i, task in enumerate(tasks[:15], 1):
             owner = get_person_name(task['owner_ids'])
-            task_context += f"{i}. {owner}: {task['task_name']} ({task['status']}) - Due: {task['due_date']}\n"
-        
-        system_prompt = """You are Task Intel Bot. Provide concise, professional responses about company tasks.
-        Format responses with clear sections, emojis, and bullet points. Be helpful but brief.
-        Focus on due dates, status, and impacts. Use the exact task data provided."""
+            task_context += f"{i}. {owner}: {task['task_name']} ({task['status']}) - Due: {task['due_date']} - Next: {task['next_step']}\n"
         
         response = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Query: {query}\n\nAvailable Tasks:\n{task_context}\n\nResponse:"}
+                {"role": "system", "content": "You are Task Intel Bot. Provide concise, professional responses about company tasks. Use exact task data provided."},
+                {"role": "user", "content": f"Query: {query}\n\nTasks:\n{task_context}\n\nResponse:"}
             ],
             max_tokens=500,
             temperature=0.3
         )
-        
         return response.choices[0].message.content
-        
     except Exception as e:
         logger.error(f"OpenAI error: {e}")
-        return "I encountered an error. Try a specific command like 'What is Brazil working on?' or 'Company status'."
+        return "I encountered an error. Try: 'What is Brazil working on?' or 'Company status'"
 
-# Process all types of queries
 def process_slack_command(command_text: str) -> str:
     tasks = get_all_tasks()
     
     if not tasks:
-        return "📊 No tasks found in Notion databases. Please check your setup."
+        return "📊 No tasks found in Notion databases."
     
     command_lower = command_text.lower()
     
-    # Use AI for natural language queries
     if len(command_text) > 10 and not command_text.startswith('/'):
         return generate_ai_response(command_text, tasks)
     
-    # Specific person query
+    # Person query
     if any(word in command_lower for word in ['what', 'who', 'working']) and any(name in command_lower for name in ['brazil', 'omar', 'deema']):
-        person_name = None
-        for name in ['brazil', 'omar', 'deema']:  # ONLY REAL PEOPLE
-            if name in command_lower:
-                person_name = name
-                break
-        
+        person_name = next((name for name in ['brazil', 'omar', 'deema'] if name in command_lower), None)
         if person_name:
             person_tasks = find_person_tasks(tasks, person_name)
-            
             if person_tasks:
                 response = f"👤 **{person_name.title()}ʼs Tasks**\n\n"
-                
                 for i, task in enumerate(person_tasks, 1):
-                    response += format_task(task, i)
-                    response += "\n"
+                    response += format_task(task, i) + "\n"
                 
-                dept_tasks = {}
+                status_counts = {}
                 for task in person_tasks:
-                    dept = task['department']
-                    dept_tasks[dept] = dept_tasks.get(dept, 0) + 1
+                    status = task['status'].split()[-1]
+                    status_counts[status] = status_counts.get(status, 0) + 1
                 
-                dept_summary = " • ".join([f"{dept}: {count}" for dept, count in dept_tasks.items()])
-                response += f"📊 **Summary:** {len(person_tasks)} tasks assigned to {person_name.title()} ({dept_summary})"
-                
+                status_summary = " • ".join([f"{status}: {count}" for status, count in status_counts.items()])
+                response += f"📊 **Summary:** {len(person_tasks)} tasks ({status_summary})"
                 return response
             else:
-                return f"👤 No tasks found for {person_name.title()}. Available people: Brazil, Omar, Deema"
+                return f"👤 No tasks found for {person_name.title()}."
     
-    # Brief/overview
+    # Brief
     elif any(word in command_lower for word in ['brief', 'overview', 'summary', 'status']):
         dept_counts = {}
         status_counts = {}
@@ -325,12 +326,10 @@ def process_slack_command(command_text: str) -> str:
         for task in tasks:
             dept = task['department']
             dept_counts[dept] = dept_counts.get(dept, 0) + 1
-            
-            status_clean = task['status'].split()[-1]  # Get status without emoji
-            status_counts[status_clean] = status_counts.get(status_clean, 0) + 1
+            status = task['status'].split()[-1]
+            status_counts[status] = status_counts.get(status, 0) + 1
         
-        response = "🏢 **Company Brief**\n\n"
-        response += "📈 **Overview:**\n"
+        response = "🏢 **Company Brief**\n\n📈 **Overview:**\n"
         for dept, count in dept_counts.items():
             response += f"• {dept}: {count} tasks\n"
         
@@ -338,25 +337,16 @@ def process_slack_command(command_text: str) -> str:
         for status, count in status_counts.items():
             response += f"• {status}: {count} tasks\n"
         
-        # Show urgent tasks (due soon or blocked)
-        urgent_tasks = [t for t in tasks if 'Blocked' in t['status'] or 'In Progress' in t['status']]
-        if urgent_tasks:
-            response += "\n🚨 **Active Tasks:**\n"
-            for task in urgent_tasks[:3]:
-                owner = get_person_name(task['owner_ids'])
-                response += f"• {owner}: {task['task_name']} - Due: {task['due_date']}\n"
-        
         return response
     
     # Help
     else:
         return ("🤖 **Task Intel Bot**\n\n"
-               "**Natural Language Queries:**\n"
-               "• `What is Brazil working on?`\n"
-               "• `Show me Omar's tasks`\n"
+               "**Ask naturally:**\n"
+               "• `What is Brazil working on?`\n" 
+               "• `Show me overdue tasks`\n"
                "• `Company status`\n\n"
-               "**Available People:** Brazil, Omar, Deema\n\n"
-               f"📊 Tracking {len(tasks)} tasks across the company")
+               f"📊 Tracking {len(tasks)} tasks")
 
 # Slack endpoints
 @app.post("/slack/command")
@@ -375,15 +365,13 @@ async def slack_command(request: Request):
         response_text = process_slack_command(command_text)
         
         return JSONResponse(content={
-            "response_type": "in_channel",
+            "response_type": "in_channel", 
             "text": response_text
         })
         
     except Exception as e:
         logger.error(f"Slack command error: {e}")
-        return JSONResponse(content={
-            "text": "⚡ Task Intel Bot - Try: 'What is Brazil working on?' or 'Company status'"
-        })
+        return JSONResponse(content={"text": "⚡ Task Intel Bot - Try: 'What is Brazil working on?'"})
 
 @app.post("/slack/events")
 async def slack_events(request: Request):
@@ -402,19 +390,18 @@ async def slack_events(request: Request):
         logger.error(f"Slack events error: {e}")
         return JSONResponse(content={"status": "error"})
 
-# Health check
 @app.get("/health")
 async def health_check():
     tasks = get_all_tasks()
     return {
         "status": "healthy",
         "total_tasks": len(tasks),
-        "message": f"Ready - {len(tasks)} tasks, natural language enabled"
+        "message": f"Ready - {len(tasks)} tasks"
     }
 
 @app.get("/")
 async def home():
-    return {"message": "Task Intel Bot - Company Wide with Natural Language"}
+    return {"message": "Task Intel Bot - Fixed Data Parsing"}
 
 if __name__ == "__main__":
     import uvicorn
