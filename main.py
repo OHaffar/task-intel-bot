@@ -76,7 +76,7 @@ async def understand_query_enhanced(query: str) -> Dict:
         if 'task' in query_lower:
             return {"intent": "task_counts"}
         elif any(word in query_lower for word in ['omar', 'derrick', 'bhavya', 'nishanth', 'chethan', 'deema', 'brazil']):
-            return {"intent": "person_task_count"}
+            return {"intent": "person_task_count", "query": query}
     
     # Individual person queries
     for person in TEAM_MEMBERS:
@@ -191,7 +191,7 @@ def get_property(props, field_name: str, field_type: str) -> str:
 
 def generate_enhanced_response(tasks: List[Dict], analysis: Dict) -> str:
     """Generate professional response with new structure"""
-    intent = analysis['intent']
+    intent = analysis.get('intent', 'team_overview')
     
     if intent == 'team_overview':
         return generate_team_overview(tasks)
@@ -214,11 +214,13 @@ def generate_enhanced_response(tasks: List[Dict], analysis: Dict) -> str:
         return generate_in_progress_report(tasks)
     elif intent == 'company_overview':
         return generate_company_overview(tasks)
-    else:
+    elif intent == 'help':
         return generate_help_response()
+    else:
+        return generate_team_overview(tasks)  # Default fallback
 
 def generate_team_overview(tasks: List[Dict]) -> str:
-    """Team task counts - what you asked for"""
+    """Team task counts"""
     task_counts = {}
     for person in TEAM_MEMBERS:
         person_tasks = [t for t in tasks if any(person.lower() in owner.lower() for owner in t['owners'])]
@@ -229,10 +231,95 @@ def generate_team_overview(tasks: List[Dict]) -> str:
     
     response = "👥 **Team Task Overview**\n\n"
     for person, count in sorted_counts:
-        response += f"• {person}: {count} task{'s' if count != 1 else ''}\n"
+        if count > 0:  # Only show people with tasks
+            response += f"• {person}: {count} task{'s' if count != 1 else ''}\n"
     
     total_tasks = len(tasks)
-    response += f"\n📊 **Total:** {total_tasks} tasks across {len([p for p in task_counts.values() if p > 0])} team members"
+    active_members = len([p for p in task_counts.values() if p > 0])
+    response += f"\n📊 **Total:** {total_tasks} tasks across {active_members} team members"
+    
+    return response
+
+def generate_team_workload(tasks: List[Dict]) -> str:
+    """Team workload analysis"""
+    task_counts = {}
+    for person in TEAM_MEMBERS:
+        person_tasks = [t for t in tasks if any(person.lower() in owner.lower() for owner in t['owners'])]
+        task_counts[person] = len(person_tasks)
+    
+    # Calculate workload indicators
+    avg_tasks = sum(task_counts.values()) / len([v for v in task_counts.values() if v > 0]) if any(task_counts.values()) else 0
+    
+    response = "👥 **Team Workload Analysis**\n\n"
+    
+    for person, count in sorted(task_counts.items(), key=lambda x: x[1], reverse=True):
+        if count > 0:
+            if count > avg_tasks * 1.5:
+                status = "🟡 Moderate load"
+            elif count > avg_tasks * 2:
+                status = "🔴 High load"
+            else:
+                status = "🟢 Balanced"
+            response += f"• {person}: {count} tasks - {status}\n"
+    
+    response += f"\n📈 **Average:** {avg_tasks:.1f} tasks per person"
+    return response
+
+def generate_task_counts(tasks: List[Dict]) -> str:
+    """Show task counts across different dimensions"""
+    total_tasks = len(tasks)
+    
+    # Status counts
+    status_counts = {}
+    priority_counts = {}
+    blocker_counts = {}
+    
+    for task in tasks:
+        status_counts[task['status']] = status_counts.get(task['status'], 0) + 1
+        priority_counts[task['priority']] = priority_counts.get(task['priority'], 0) + 1
+        if task['blocker'] not in ['None', 'Not set']:
+            blocker_counts[task['blocker']] = blocker_counts.get(task['blocker'], 0) + 1
+    
+    response = "📊 **Task Counts Overview**\n\n"
+    response += f"• **Total tasks:** {total_tasks}\n"
+    
+    if status_counts:
+        response += f"• **By status:** "
+        response += ", ".join([f"{status}: {count}" for status, count in status_counts.items()]) + "\n"
+    
+    if priority_counts:
+        valid_priorities = {k: v for k, v in priority_counts.items() if k != 'Not set'}
+        if valid_priorities:
+            response += f"• **By priority:** "
+            response += ", ".join([f"{priority}: {count}" for priority, count in valid_priorities.items()]) + "\n"
+    
+    if blocker_counts:
+        response += f"• **Blockers:** "
+        response += ", ".join([f"{blocker}: {count}" for blocker, count in blocker_counts.items()]) + "\n"
+    
+    return response
+
+def generate_person_task_count(tasks: List[Dict], person: str) -> str:
+    """Show task count for a specific person"""
+    person_tasks = [t for t in tasks if any(person.lower() in owner.lower() for owner in t['owners'])]
+    count = len(person_tasks)
+    
+    if count == 0:
+        return f"👤 **{person}** has no tasks assigned currently."
+    
+    # Breakdown by status
+    status_counts = {}
+    for task in person_tasks:
+        status_counts[task['status']] = status_counts.get(task['status'], 0) + 1
+    
+    response = f"👤 **{person}** has {count} task{'s' if count != 1 else ''}:\n"
+    for status, status_count in status_counts.items():
+        response += f"• {status}: {status_count}\n"
+    
+    # Show high priority count
+    high_priority = len([t for t in person_tasks if t['priority'] == 'High'])
+    if high_priority > 0:
+        response += f"• High priority: {high_priority}\n"
     
     return response
 
@@ -291,36 +378,6 @@ def generate_person_detail(tasks: List[Dict], person: str) -> str:
     
     return response
 
-def generate_task_counts(tasks: List[Dict]) -> str:
-    """Show task counts across different dimensions"""
-    total_tasks = len(tasks)
-    
-    # Status counts
-    status_counts = {}
-    priority_counts = {}
-    blocker_counts = {}
-    
-    for task in tasks:
-        status_counts[task['status']] = status_counts.get(task['status'], 0) + 1
-        priority_counts[task['priority']] = priority_counts.get(task['priority'], 0) + 1
-        if task['blocker'] not in ['None', 'Not set']:
-            blocker_counts[task['blocker']] = blocker_counts.get(task['blocker'], 0) + 1
-    
-    response = "📊 **Task Counts Overview**\n\n"
-    response += f"• **Total tasks:** {total_tasks}\n"
-    
-    response += f"• **By status:** "
-    response += ", ".join([f"{status}: {count}" for status, count in status_counts.items()]) + "\n"
-    
-    response += f"• **By priority:** "
-    response += ", ".join([f"{priority}: {count}" for priority, count in priority_counts.items() if priority != 'Not set']) + "\n"
-    
-    if blocker_counts:
-        response += f"• **Blockers:** "
-        response += ", ".join([f"{blocker}: {count}" for blocker, count in blocker_counts.items()]) + "\n"
-    
-    return response
-
 def extract_person_from_query(query: str) -> Optional[str]:
     """Extract person name from query"""
     query_lower = query.lower()
@@ -329,33 +386,43 @@ def extract_person_from_query(query: str) -> Optional[str]:
             return person
     return None
 
-# Additional generator functions would go here...
-# (team_workload, department_overview, blockers_report, etc.)
+# Simplified versions of other generators to avoid errors
+def generate_department_overview(tasks: List[Dict], department: str) -> str:
+    dept_tasks = [t for t in tasks if t['department'] == department]
+    return f"🏢 **{department} Department:** {len(dept_tasks)} tasks currently active"
+
+def generate_blockers_report(tasks: List[Dict]) -> str:
+    blocked_tasks = [t for t in tasks if t['blocker'] not in ['None', 'Not set']]
+    return f"🚧 **Blocked Items:** {len(blocked_tasks)} tasks need attention"
+
+def generate_priorities_report(tasks: List[Dict]) -> str:
+    high_priority = [t for t in tasks if t['priority'] == 'High']
+    return f"🎯 **High Priority:** {len(high_priority)} critical tasks"
+
+def generate_in_progress_report(tasks: List[Dict]) -> str:
+    in_progress = [t for t in tasks if t['status'] == 'In progress']
+    return f"🔄 **In Progress:** {len(in_progress)} tasks being worked on"
+
+def generate_company_overview(tasks: List[Dict]) -> str:
+    total = len(tasks)
+    in_progress = len([t for t in tasks if t['status'] == 'In progress'])
+    blocked = len([t for t in tasks if t['blocker'] not in ['None', 'Not set']])
+    return f"🏢 **Company Overview:** {total} total tasks, {in_progress} in progress, {blocked} blocked"
 
 def generate_help_response() -> str:
-    """Enhanced help with new capabilities"""
     return """🤖 **Enhanced Task Intel Bot**
 
-*New capabilities:*
-• "Team task counts" or "How many tasks does everyone have?"
-• "Omar's workload" or "How busy is Derrick?"
-• "What's everyone working on?" - Team overview
-• "High priority items" or "What's blocked?"
+*Try these commands:*
+• "team tasks" or "team workload"
+• "how many tasks does omar have?"
+• "what is derrick working on?"
+• "company overview"
+• "what's blocked?"
 
-*Enhanced responses now show:*
-• Professional priority-based grouping
-• Impact and context prominently
-• Complete task visibility (not just in-progress)
-• Strategic summaries
-
-*Examples:*
-• `/intel team tasks`
-• `/intel what is omar working on?` 
-• `/intel how many tasks does everyone have?`
-• `/intel company overview`"""
-
-# ... (rest of the existing functions: get_all_tasks, parse_task, get_property, 
-# slack_command, process_query, send_slack_response remain the same)
+*New features:*
+• Professional task grouping by priority
+• Team workload analysis
+• Complete task visibility"""
 
 @app.post("/slack/command")
 async def slack_command(request: Request, background_tasks: BackgroundTasks):
