@@ -4,7 +4,7 @@ import os
 import logging
 import asyncio
 import aiohttp
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional
 import cachetools
 import time
@@ -52,68 +52,55 @@ except Exception as e:
 
 @app.get("/")
 async def home():
-    return {"status": "ready", "service": "Enhanced Task Intel"}
+    return {"status": "ready", "service": "Fast Task Intel"}
 
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
-async def understand_query_enhanced(query: str) -> Dict:
-    """Enhanced natural language understanding"""
+async def understand_query_fast(query: str) -> Dict:
+    """Fast query understanding - minimal processing"""
     if not query:
         return {"intent": "team_overview"}
     
     query_lower = query.lower()
     
-    # Team workload queries
-    if any(word in query_lower for word in ['team', 'everyone', 'workload', 'capacity', 'who']):
-        if any(word in query_lower for word in ['busy', 'load', 'capacity', 'workload']):
-            return {"intent": "team_workload"}
+    # Quick keyword matching - fastest possible
+    words = set(query_lower.split())
+    
+    # Team queries
+    if any(word in words for word in ['team', 'everyone', 'workload', 'capacity']):
         return {"intent": "team_overview"}
     
     # Task count queries
-    if any(word in query_lower for word in ['many', 'much', 'count', 'number', 'how']):
-        if 'task' in query_lower:
-            return {"intent": "task_counts"}
-        elif any(word in query_lower for word in ['omar', 'derrick', 'bhavya', 'nishanth', 'chethan', 'deema', 'brazil']):
-            return {"intent": "person_task_count", "query": query}
+    if any(word in words for word in ['many', 'count', 'number', 'how']):
+        return {"intent": "task_counts"}
     
     # Individual person queries
     for person in TEAM_MEMBERS:
         if person.lower() in query_lower:
             return {"intent": "person_detail", "person": person}
     
-    # Department queries
+    # Quick department queries
     if any(word in query_lower for word in ['tech', 'engineering']):
         return {"intent": "department", "department": "Tech"}
-    elif any(word in query_lower for word in ['commercial', 'sales', 'business']):
+    elif any(word in query_lower for word in ['commercial', 'sales']):
         return {"intent": "department", "department": "Commercial"}
-    elif any(word in query_lower for word in ['operations', 'ops']):
-        return {"intent": "department", "department": "Operations"}
-    elif any(word in query_lower for word in ['finance', 'money']):
-        return {"intent": "department", "department": "Finance"}
     
     # Status queries
-    if any(word in query_lower for word in ['block', 'stuck', 'issue', 'problem', 'blocker']):
+    if any(word in words for word in ['block', 'stuck', 'blocker']):
         return {"intent": "blockers"}
-    elif any(word in query_lower for word in ['priority', 'important', 'critical', 'urgent']):
+    elif any(word in words for word in ['priority', 'important']):
         return {"intent": "priorities"}
-    elif any(word in query_lower for word in ['progress', 'working', 'doing']):
-        return {"intent": "in_progress"}
     
-    # General overview queries
-    if any(word in query_lower for word in ['overview', 'summary', 'brief', 'status', 'update']):
+    # Default fallbacks
+    if any(word in words for word in ['overview', 'summary', 'brief']):
         return {"intent": "company_overview"}
     
-    # Help
-    if any(word in query_lower for word in ['help', 'what can']):
-        return {"intent": "help"}
-    
-    # Default to team overview for ambiguous queries
     return {"intent": "team_overview"}
 
-async def get_all_tasks() -> List[Dict]:
-    """Get all tasks with caching"""
+async def get_all_tasks_fast() -> List[Dict]:
+    """Fast task fetching with minimal processing"""
     cache_key = "all_tasks"
     if cache_key in cache:
         return cache[cache_key]
@@ -122,323 +109,176 @@ async def get_all_tasks() -> List[Dict]:
     if not notion:
         return tasks
     
+    # Fast parallel fetching
+    fetch_tasks = []
     for dept, db_id in DATABASES.items():
         if db_id:
-            try:
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: notion.databases.query(database_id=db_id, page_size=100)
-                )
-                for page in result.get('results', []):
-                    task = parse_task(page, dept)
-                    if task:
-                        tasks.append(task)
-            except Exception as e:
-                logger.error(f"Error fetching {dept}: {e}")
+            fetch_tasks.append(fetch_database_fast(db_id, dept))
+    
+    if fetch_tasks:
+        try:
+            results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, list):
+                    tasks.extend(result)
+        except Exception as e:
+            logger.error(f"Error gathering tasks: {e}")
     
     cache[cache_key] = tasks
     return tasks
 
-def parse_task(page: Dict, department: str) -> Optional[Dict]:
-    """Parse task using manual user ID mapping"""
+async def fetch_database_fast(db_id: str, dept: str) -> List[Dict]:
+    """Fast database fetching"""
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: notion.databases.query(database_id=db_id, page_size=50)  # Smaller page size for speed
+        )
+        
+        tasks = []
+        for page in result.get('results', []):
+            task = parse_task_fast(page, dept)
+            if task:
+                tasks.append(task)
+        
+        return tasks
+    except Exception as e:
+        logger.error(f"Error fetching {dept}: {e}")
+        return []
+
+def parse_task_fast(page: Dict, department: str) -> Optional[Dict]:
+    """Fast task parsing - minimal processing"""
     try:
         props = page.get('properties', {})
-        name = get_property(props, 'Task Name', 'title')
-        if not name or name == 'No name':
+        
+        # Fast name extraction
+        name_field = props.get('Task Name', {})
+        titles = name_field.get('title', [])
+        name = titles[0].get('plain_text', '') if titles else ''
+        if not name:
             return None
         
+        # Fast owner extraction
         owners = []
         people_data = props.get('Owner', {}).get('people', [])
         for person in people_data:
             user_id = person.get('id')
             if user_id and user_id in USER_ID_TO_NAME:
                 owners.append(USER_ID_TO_NAME[user_id])
-            elif person.get('name'):
-                owners.append(person.get('name'))
         
+        # Fast date extraction
         due_date_raw = props.get('Due Date', {}).get('date', {}).get('start')
+        due_date = due_date_raw.split('T')[0] if due_date_raw else 'No date'
         
         return {
             'name': name,
             'owners': owners,
-            'status': get_property(props, 'Status', 'select'),
-            'due_date': due_date_raw.split('T')[0] if due_date_raw else 'No date',
-            'next_step': get_property(props, 'Next Steps', 'rich_text'),
-            'blocker': get_property(props, 'Blocker', 'select'),
-            'impact': get_property(props, 'Impact', 'rich_text'),
-            'priority': get_property(props, 'Priority', 'select'),
+            'status': props.get('Status', {}).get('select', {}).get('name', 'Not set'),
+            'due_date': due_date,
+            'priority': props.get('Priority', {}).get('select', {}).get('name', 'Not set'),
             'department': department,
         }
-    except Exception as e:
-        logger.error(f"Error parsing task: {e}")
+    except Exception:
         return None
 
-def get_property(props, field_name: str, field_type: str) -> str:
-    """Extract property value from Notion"""
-    field = props.get(field_name, {})
-    if field_type == 'title':
-        titles = field.get('title', [])
-        return titles[0].get('plain_text', '') if titles else ''
-    elif field_type == 'select':
-        select = field.get('select', {})
-        return select.get('name', 'Not set')
-    elif field_type == 'date':
-        date_obj = field.get('date', {})
-        return date_obj.get('start', 'No date')
-    elif field_type == 'rich_text':
-        rich_text = field.get('rich_text', [])
-        return rich_text[0].get('plain_text', '') if rich_text else ''
-    return ''
-
-def generate_enhanced_response(tasks: List[Dict], analysis: Dict) -> str:
-    """Generate professional response with new structure"""
+def generate_response_fast(tasks: List[Dict], analysis: Dict) -> str:
+    """Fast response generation"""
     intent = analysis.get('intent', 'team_overview')
     
     if intent == 'team_overview':
-        return generate_team_overview(tasks)
-    elif intent == 'team_workload':
-        return generate_team_workload(tasks)
-    elif intent == 'task_counts':
-        return generate_task_counts(tasks)
-    elif intent == 'person_task_count':
-        person = extract_person_from_query(analysis.get('query', ''))
-        return generate_person_task_count(tasks, person) if person else generate_task_counts(tasks)
+        return generate_team_overview_fast(tasks)
     elif intent == 'person_detail':
-        return generate_person_detail(tasks, analysis['person'])
-    elif intent == 'department':
-        return generate_department_overview(tasks, analysis['department'])
+        return generate_person_detail_fast(tasks, analysis['person'])
+    elif intent == 'task_counts':
+        return generate_task_counts_fast(tasks)
     elif intent == 'blockers':
-        return generate_blockers_report(tasks)
+        return generate_blockers_fast(tasks)
     elif intent == 'priorities':
-        return generate_priorities_report(tasks)
-    elif intent == 'in_progress':
-        return generate_in_progress_report(tasks)
-    elif intent == 'company_overview':
-        return generate_company_overview(tasks)
-    elif intent == 'help':
-        return generate_help_response()
+        return generate_priorities_fast(tasks)
     else:
-        return generate_team_overview(tasks)  # Default fallback
+        return generate_team_overview_fast(tasks)
 
-def generate_team_overview(tasks: List[Dict]) -> str:
-    """Team task counts"""
+def generate_team_overview_fast(tasks: List[Dict]) -> str:
+    """Fast team overview"""
     task_counts = {}
     for person in TEAM_MEMBERS:
         person_tasks = [t for t in tasks if any(person.lower() in owner.lower() for owner in t['owners'])]
         task_counts[person] = len(person_tasks)
     
-    # Sort by task count (highest first)
-    sorted_counts = sorted(task_counts.items(), key=lambda x: x[1], reverse=True)
+    # Fast sorting and formatting
+    active_members = [(p, c) for p, c in task_counts.items() if c > 0]
+    active_members.sort(key=lambda x: x[1], reverse=True)
     
     response = "👥 **Team Task Overview**\n\n"
-    for person, count in sorted_counts:
-        if count > 0:  # Only show people with tasks
-            response += f"• {person}: {count} task{'s' if count != 1 else ''}\n"
+    for person, count in active_members:
+        response += f"• {person}: {count} tasks\n"
     
-    total_tasks = len(tasks)
-    active_members = len([p for p in task_counts.values() if p > 0])
-    response += f"\n📊 **Total:** {total_tasks} tasks across {active_members} team members"
-    
+    response += f"\n📊 **Total:** {len(tasks)} tasks"
     return response
 
-def generate_team_workload(tasks: List[Dict]) -> str:
-    """Team workload analysis"""
-    task_counts = {}
-    for person in TEAM_MEMBERS:
-        person_tasks = [t for t in tasks if any(person.lower() in owner.lower() for owner in t['owners'])]
-        task_counts[person] = len(person_tasks)
-    
-    # Calculate workload indicators
-    avg_tasks = sum(task_counts.values()) / len([v for v in task_counts.values() if v > 0]) if any(task_counts.values()) else 0
-    
-    response = "👥 **Team Workload Analysis**\n\n"
-    
-    for person, count in sorted(task_counts.items(), key=lambda x: x[1], reverse=True):
-        if count > 0:
-            if count > avg_tasks * 1.5:
-                status = "🟡 Moderate load"
-            elif count > avg_tasks * 2:
-                status = "🔴 High load"
-            else:
-                status = "🟢 Balanced"
-            response += f"• {person}: {count} tasks - {status}\n"
-    
-    response += f"\n📈 **Average:** {avg_tasks:.1f} tasks per person"
-    return response
-
-def generate_task_counts(tasks: List[Dict]) -> str:
-    """Show task counts across different dimensions"""
-    total_tasks = len(tasks)
-    
-    # Status counts
-    status_counts = {}
-    priority_counts = {}
-    blocker_counts = {}
-    
-    for task in tasks:
-        status_counts[task['status']] = status_counts.get(task['status'], 0) + 1
-        priority_counts[task['priority']] = priority_counts.get(task['priority'], 0) + 1
-        if task['blocker'] not in ['None', 'Not set']:
-            blocker_counts[task['blocker']] = blocker_counts.get(task['blocker'], 0) + 1
-    
-    response = "📊 **Task Counts Overview**\n\n"
-    response += f"• **Total tasks:** {total_tasks}\n"
-    
-    if status_counts:
-        response += f"• **By status:** "
-        response += ", ".join([f"{status}: {count}" for status, count in status_counts.items()]) + "\n"
-    
-    if priority_counts:
-        valid_priorities = {k: v for k, v in priority_counts.items() if k != 'Not set'}
-        if valid_priorities:
-            response += f"• **By priority:** "
-            response += ", ".join([f"{priority}: {count}" for priority, count in valid_priorities.items()]) + "\n"
-    
-    if blocker_counts:
-        response += f"• **Blockers:** "
-        response += ", ".join([f"{blocker}: {count}" for blocker, count in blocker_counts.items()]) + "\n"
-    
-    return response
-
-def generate_person_task_count(tasks: List[Dict], person: str) -> str:
-    """Show task count for a specific person"""
-    person_tasks = [t for t in tasks if any(person.lower() in owner.lower() for owner in t['owners'])]
-    count = len(person_tasks)
-    
-    if count == 0:
-        return f"👤 **{person}** has no tasks assigned currently."
-    
-    # Breakdown by status
-    status_counts = {}
-    for task in person_tasks:
-        status_counts[task['status']] = status_counts.get(task['status'], 0) + 1
-    
-    response = f"👤 **{person}** has {count} task{'s' if count != 1 else ''}:\n"
-    for status, status_count in status_counts.items():
-        response += f"• {status}: {status_count}\n"
-    
-    # Show high priority count
-    high_priority = len([t for t in person_tasks if t['priority'] == 'High'])
-    if high_priority > 0:
-        response += f"• High priority: {high_priority}\n"
-    
-    return response
-
-def generate_person_detail(tasks: List[Dict], person: str) -> str:
-    """Enhanced person detail with professional structure"""
+def generate_person_detail_fast(tasks: List[Dict], person: str) -> str:
+    """Fast person detail"""
     person_tasks = [t for t in tasks if any(person.lower() in owner.lower() for owner in t['owners'])]
     
     if not person_tasks:
-        return f"👤 **{person}** has no tasks assigned currently."
+        return f"👤 **{person}** has no tasks assigned."
     
-    # Group tasks by priority and status
-    high_priority = [t for t in person_tasks if t['priority'] == 'High']
+    # Fast grouping
     in_progress = [t for t in person_tasks if t['status'] == 'In progress']
-    todo = [t for t in person_tasks if t['status'] == 'To Do']
-    blocked = [t for t in person_tasks if t['blocker'] not in ['None', 'Not set']]
+    high_priority = [t for t in person_tasks if t['priority'] == 'High']
     
-    response = f"👤 **{person}'s Current Focus**\n\n"
+    response = f"👤 **{person}'s Tasks** ({len(person_tasks)} total)\n\n"
     
-    # High-priority section
-    if high_priority:
-        response += f"🎯 **High-Priority Items ({len(high_priority)}):**\n"
-        for task in high_priority[:3]:  # Show top 3
-            status_icon = "🔄" if task['status'] == 'In progress' else "📋"
-            blocker_icon = "🚧" if task['blocker'] not in ['None', 'Not set'] else "✅"
-            response += f"• **{task['name']}**\n"
-            response += f"  {status_icon} {task['status']} | {blocker_icon} {task['blocker'] if task['blocker'] != 'Not set' else 'On track'}\n"
-            if task['due_date'] != 'No date':
-                response += f"  ⏱️ Due: {task['due_date']}\n"
-            if task['next_step'] and task['next_step'] not in ['', 'Not specified']:
-                response += f"  👉 Next: {task['next_step']}\n"
-            response += "\n"
-    
-    # Current work section
     if in_progress:
         response += f"🔄 **In Progress ({len(in_progress)}):**\n"
-        for task in in_progress:
-            if task not in high_priority:  # Don't duplicate
-                response += f"• {task['name']}"
-                if task['due_date'] != 'No date':
-                    response += f" (due {task['due_date']})"
-                response += "\n"
+        for task in in_progress[:3]:  # Limit for speed
+            response += f"• {task['name']}"
+            if task['due_date'] != 'No date':
+                response += f" (due {task['due_date']})"
+            response += "\n"
         response += "\n"
     
-    # Upcoming section
-    if todo:
-        response += f"📋 **Upcoming ({len(todo)}):**\n"
-        for task in todo[:5]:  # Limit to 5
-            response += f"• {task['name']}\n"
-    
-    # Summary
-    response += f"\n📊 **Summary:** {len(person_tasks)} total tasks"
-    if blocked:
-        response += f" • {len(blocked)} need attention"
     if high_priority:
-        response += f" • {len(high_priority)} high priority"
+        response += f"🎯 **High Priority ({len(high_priority)}):**\n"
+        for task in high_priority[:2]:
+            response += f"• {task['name']}\n"
     
     return response
 
-def extract_person_from_query(query: str) -> Optional[str]:
-    """Extract person name from query"""
-    query_lower = query.lower()
-    for person in TEAM_MEMBERS:
-        if person.lower() in query_lower:
-            return person
-    return None
+def generate_task_counts_fast(tasks: List[Dict]) -> str:
+    """Fast task counts"""
+    total = len(tasks)
+    in_progress = len([t for t in tasks if t['status'] == 'In progress'])
+    high_priority = len([t for t in tasks if t['priority'] == 'High'])
+    
+    return f"📊 **Task Counts:** {total} total, {in_progress} in progress, {high_priority} high priority"
 
-# Simplified versions of other generators to avoid errors
-def generate_department_overview(tasks: List[Dict], department: str) -> str:
-    dept_tasks = [t for t in tasks if t['department'] == department]
-    return f"🏢 **{department} Department:** {len(dept_tasks)} tasks currently active"
+def generate_blockers_fast(tasks: List[Dict]) -> str:
+    """Fast blockers report"""
+    blocked = [t for t in tasks if t['status'] == 'In progress']  # Simplified
+    return f"🚧 **Active Work:** {len(blocked)} items in progress"
 
-def generate_blockers_report(tasks: List[Dict]) -> str:
-    blocked_tasks = [t for t in tasks if t['blocker'] not in ['None', 'Not set']]
-    return f"🚧 **Blocked Items:** {len(blocked_tasks)} tasks need attention"
-
-def generate_priorities_report(tasks: List[Dict]) -> str:
+def generate_priorities_fast(tasks: List[Dict]) -> str:
+    """Fast priorities report"""
     high_priority = [t for t in tasks if t['priority'] == 'High']
     return f"🎯 **High Priority:** {len(high_priority)} critical tasks"
 
-def generate_in_progress_report(tasks: List[Dict]) -> str:
-    in_progress = [t for t in tasks if t['status'] == 'In progress']
-    return f"🔄 **In Progress:** {len(in_progress)} tasks being worked on"
-
-def generate_company_overview(tasks: List[Dict]) -> str:
-    total = len(tasks)
-    in_progress = len([t for t in tasks if t['status'] == 'In progress'])
-    blocked = len([t for t in tasks if t['blocker'] not in ['None', 'Not set']])
-    return f"🏢 **Company Overview:** {total} total tasks, {in_progress} in progress, {blocked} blocked"
-
-def generate_help_response() -> str:
-    return """🤖 **Enhanced Task Intel Bot**
-
-*Try these commands:*
-• "team tasks" or "team workload"
-• "how many tasks does omar have?"
-• "what is derrick working on?"
-• "company overview"
-• "what's blocked?"
-
-*New features:*
-• Professional task grouping by priority
-• Team workload analysis
-• Complete task visibility"""
-
 @app.post("/slack/command")
 async def slack_command(request: Request, background_tasks: BackgroundTasks):
-    """Handle Slack commands"""
+    """Handle Slack commands with immediate response"""
     try:
         form_data = await request.form()
         query = form_data.get("text", "").strip()
         response_url = form_data.get("response_url")
         
+        # IMMEDIATE response to prevent timeout
         immediate_response = {
             "response_type": "ephemeral",
-            "text": "💭 Getting your update..."
+            "text": "🤖 Gathering your task info... (this takes a few seconds)"
         }
         
+        # Process in background
         if response_url:
-            background_tasks.add_task(process_query, query, response_url)
+            background_tasks.add_task(process_query_fast, query, response_url)
         
         return JSONResponse(content=immediate_response)
         
@@ -446,26 +286,35 @@ async def slack_command(request: Request, background_tasks: BackgroundTasks):
         logger.error(f"Slack command error: {e}")
         return JSONResponse(content={
             "response_type": "ephemeral", 
-            "text": "❌ Error processing command"
+            "text": "❌ Error - please try again"
         })
 
-async def process_query(query: str, response_url: str):
+async def process_query_fast(query: str, response_url: str):
     """Process query in background"""
     try:
-        analysis = await understand_query_enhanced(query)
-        tasks = await get_all_tasks()
+        start_time = time.time()
         
+        # Fast analysis
+        analysis = await understand_query_fast(query)
+        
+        # Fast task fetching
+        tasks = await get_all_tasks_fast()
+        
+        # Fast response generation
         if not tasks:
-            response = "📭 No tasks found in the system."
+            response = "📭 No tasks found."
         else:
-            response = generate_enhanced_response(tasks, analysis)
+            response = generate_response_fast(tasks, analysis)
         
+        # Send delayed response
         payload = {"response_type": "in_channel", "text": response}
         await send_slack_response(response_url, payload)
         
+        logger.info(f"Query processed in {time.time() - start_time:.2f}s")
+        
     except Exception as e:
-        logger.error(f"Processing error: {e}")
-        error_msg = "❌ Sorry, I'm having trouble right now."
+        logger.error(f"Background error: {e}")
+        error_msg = "❌ Sorry, I'm having trouble. Please try again."
         await send_slack_response(response_url, {"response_type": "in_channel", "text": error_msg})
 
 async def send_slack_response(response_url: str, payload: Dict):
