@@ -4,7 +4,7 @@ import os
 import logging
 import asyncio
 import aiohttp
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import cachetools
 import time
@@ -88,10 +88,40 @@ async def understand_query(query: str) -> Dict:
     if any(word in query_lower for word in ['next steps', 'what next', 'what should', 'recommend']):
         return {"intent": "next_steps", "tone": "helpful"}
     
-    # Check for team members
+    # NEW: Deadline and weekly tracking intents
+    if any(word in query_lower for word in ['due this week', 'this week', 'weekly tasks', 'week plan']):
+        return {"intent": "this_week", "tone": "proactive"}
+    
+    if any(word in query_lower for word in ['due next week', 'next week', 'upcoming week']):
+        return {"intent": "next_week", "tone": "forward_looking"}
+    
+    if any(word in query_lower for word in ['late', 'overdue', 'past due', 'missed deadline', 'deadlines passed']):
+        return {"intent": "late_tasks", "tone": "urgent"}
+    
+    # Check for team members with weekly context
     for person_key, person_name in TEAM_MEMBERS.items():
         if person_key in query_lower:
+            if 'week' in query_lower or 'finish' in query_lower:
+                return {"intent": "person_weekly", "person": person_name, "tone": "supportive"}
             return {"intent": "person_update", "person": person_name, "tone": "supportive"}
+    
+    # Check for departments with weekly context
+    if any(word in query_lower for word in ['tech', 'engineering']):
+        if 'week' in query_lower or 'finish' in query_lower:
+            return {"intent": "department_weekly", "department": "Tech", "tone": "informative"}
+        return {"intent": "department_update", "department": "Tech", "tone": "informative"}
+    elif any(word in query_lower for word in ['commercial', 'sales', 'business']):
+        if 'week' in query_lower or 'finish' in query_lower:
+            return {"intent": "department_weekly", "department": "Commercial", "tone": "informative"}
+        return {"intent": "department_update", "department": "Commercial", "tone": "informative"}
+    elif any(word in query_lower for word in ['operations', 'ops']):
+        if 'week' in query_lower or 'finish' in query_lower:
+            return {"intent": "department_weekly", "department": "Operations", "tone": "informative"}
+        return {"intent": "department_update", "department": "Operations", "tone": "informative"}
+    elif any(word in query_lower for word in ['finance', 'financial']):
+        if 'week' in query_lower or 'finish' in query_lower:
+            return {"intent": "department_weekly", "department": "Finance", "tone": "informative"}
+        return {"intent": "department_update", "department": "Finance", "tone": "informative"}
     
     # Check for other intents
     if any(word in query_lower for word in ['brief', 'overview', 'company', 'status', 'update']):
@@ -102,15 +132,6 @@ async def understand_query(query: str) -> Dict:
     
     if any(word in query_lower for word in ['priority', 'important', 'critical', 'urgent']):
         return {"intent": "priorities_update", "tone": "focused"}
-    
-    if any(word in query_lower for word in ['tech', 'engineering']):
-        return {"intent": "department_update", "department": "Tech", "tone": "informative"}
-    elif any(word in query_lower for word in ['commercial', 'sales', 'business']):
-        return {"intent": "department_update", "department": "Commercial", "tone": "informative"}
-    elif any(word in query_lower for word in ['operations', 'ops']):
-        return {"intent": "department_update", "department": "Operations", "tone": "informative"}
-    elif any(word in query_lower for word in ['finance', 'financial']):
-        return {"intent": "department_update", "department": "Finance", "tone": "informative"}
     
     # Default to helpful response
     return {"intent": "help", "tone": "friendly"}
@@ -145,7 +166,7 @@ async def get_all_tasks() -> List[Dict]:
     return tasks
 
 def parse_task(page: Dict, department: str) -> Optional[Dict]:
-    """Parse task using manual user ID mapping"""
+    """Parse task using manual user ID mapping with due date analysis"""
     try:
         props = page.get('properties', {})
         
@@ -167,17 +188,36 @@ def parse_task(page: Dict, department: str) -> Optional[Dict]:
                 owners.append(f"user_{user_id[-6:]}")
         
         due_date_raw = props.get('Due Date', {}).get('date', {}).get('start')
+        due_date = due_date_raw.split('T')[0] if due_date_raw else None
+        
+        # Calculate if task is late
+        is_late = False
+        days_late = 0
+        if due_date:
+            try:
+                due_datetime = datetime.strptime(due_date, '%Y-%m-%d')
+                today = datetime.now().date()
+                if due_datetime.date() < today:
+                    is_late = True
+                    days_late = (today - due_datetime.date()).days
+            except ValueError:
+                pass
+        
+        status = get_property(props, 'Status', 'select')
         
         return {
             'name': name,
             'owners': owners,
-            'status': get_property(props, 'Status', 'select'),
-            'due_date': due_date_raw.split('T')[0] if due_date_raw else 'No date',
+            'status': status,
+            'due_date': due_date if due_date else 'No date',
             'next_step': get_property(props, 'Next Steps', 'rich_text'),
             'blocker': get_property(props, 'Blocker', 'select'),
             'impact': get_property(props, 'Impact', 'rich_text'),
             'priority': get_property(props, 'Priority', 'select'),
             'department': department,
+            'is_late': is_late,
+            'days_late': days_late,
+            'is_completed': status.lower() in ['done', 'completed', 'finished']
         }
         
     except Exception as e:
@@ -209,7 +249,7 @@ def generate_response(tasks: List[Dict], analysis: Dict) -> str:
     tone = analysis.get('tone', 'friendly')
     
     if intent == 'greeting':
-        return f"👋 Hey there! I'm your Task Intel Bot. I can tell you what everyone's working on, company status, blockers, or priorities. What would you like to know?"
+        return f"👋 Hey there! I'm your Task Intel Bot. I can tell you what everyone's working on, deadlines, weekly plans, and more. What would you like to know?"
     
     if intent == 'thanks':
         return "🙏 You're welcome! Happy to help. What else can I update you on?"
@@ -217,13 +257,37 @@ def generate_response(tasks: List[Dict], analysis: Dict) -> str:
     if intent == 'help':
         return """🤖 *How I can help you:*
 
-• *People:* "What is Omar working on?" or "How's Derrick's workload?"
+• *People:* "What is Omar working on?" or "What should Derrick finish this week?"
+• *Deadlines:* "What tasks are late?" or "What's due this week?"
+• *Weekly Plans:* "What should Operations finish this week?" or "Next week's tasks"
 • *Company:* "Company update" or "How are we doing?"
 • *Blockers:* "What's blocked?" or "Any issues?"
 • *Priorities:* "High priority items" or "What's urgent?"
 • *Departments:* "Tech status" or "Commercial update"
 
 Just ask naturally! I understand conversational language."""
+
+    # NEW: This week's tasks
+    if intent == 'this_week':
+        return generate_weekly_tasks(tasks, "this_week")
+    
+    # NEW: Next week's tasks
+    if intent == 'next_week':
+        return generate_weekly_tasks(tasks, "next_week")
+    
+    # NEW: Late tasks
+    if intent == 'late_tasks':
+        return generate_late_tasks(tasks)
+    
+    # NEW: Person's weekly tasks
+    if intent == 'person_weekly':
+        person = analysis['person']
+        return generate_person_weekly_tasks(tasks, person)
+    
+    # NEW: Department's weekly tasks
+    if intent == 'department_weekly':
+        dept = analysis.get('department', 'All')
+        return generate_department_weekly_tasks(tasks, dept)
 
     if intent == 'next_steps':
         # Show tasks with meaningful next steps
@@ -286,12 +350,14 @@ Just ask naturally! I understand conversational language."""
         in_progress = len([t for t in tasks if t['status'] == 'In progress'])
         blocked = len([t for t in tasks if t['blocker'] not in ['None', 'Not set']])
         high_priority = len([t for t in tasks if t['priority'] == 'High'])
+        late_tasks = len([t for t in tasks if t['is_late'] and not t['is_completed']])
         
         response = "🏢 *Company Update*\n\n"
         response += f"We have *{total_tasks} active tasks* across the company:\n"
         response += f"• {in_progress} in progress\n"
         response += f"• {blocked} currently blocked\n" 
-        response += f"• {high_priority} high priority items\n\n"
+        response += f"• {high_priority} high priority items\n"
+        response += f"• {late_tasks} overdue tasks\n\n"
         
         # Show critical blockers
         major_blockers = [t for t in tasks if t['blocker'] == 'Major']
@@ -382,6 +448,175 @@ Just ask naturally! I understand conversational language."""
                 response += f"• {task['next_step']}\n"
         
         return response
+
+# NEW: Weekly tasks generator
+def generate_weekly_tasks(tasks: List[Dict], week_type: str) -> str:
+    """Generate weekly tasks overview"""
+    today = datetime.now().date()
+    
+    if week_type == "this_week":
+        start_date = today - timedelta(days=today.weekday())
+        end_date = start_date + timedelta(days=6)
+        title = "This Week"
+    else:  # next_week
+        start_date = today + timedelta(days=(7 - today.weekday()))
+        end_date = start_date + timedelta(days=6)
+        title = "Next Week"
+    
+    weekly_tasks = []
+    for task in tasks:
+        if task['due_date'] != 'No date' and not task['is_completed']:
+            try:
+                due_date = datetime.strptime(task['due_date'], '%Y-%m-%d').date()
+                if start_date <= due_date <= end_date:
+                    weekly_tasks.append(task)
+            except ValueError:
+                continue
+    
+    if not weekly_tasks:
+        return f"📅 *{title}'s Tasks ({start_date} to {end_date}):*\nNo tasks due {title.lower()}. The team may be working on ongoing projects."
+    
+    response = f"📅 *{title}'s Deadlines ({start_date} to {end_date}):*\n\n"
+    
+    # Group by department
+    dept_groups = {}
+    for task in weekly_tasks:
+        dept = task['department']
+        if dept not in dept_groups:
+            dept_groups[dept] = []
+        dept_groups[dept].append(task)
+    
+    for dept, dept_tasks in dept_groups.items():
+        response += f"*{dept} Department ({len(dept_tasks)} tasks):*\n"
+        for task in dept_tasks[:5]:
+            owners = ', '.join(task['owners']) if task['owners'] else 'Team'
+            response += f"• {task['name']} ({owners}) - Due: {task['due_date']}\n"
+            if task['priority'] == 'High':
+                response += "  🚨 High Priority\n"
+        response += "\n"
+    
+    return response
+
+# NEW: Late tasks generator
+def generate_late_tasks(tasks: List[Dict]) -> str:
+    """Generate late tasks report"""
+    late_tasks = [t for t in tasks if t['is_late'] and not t['is_completed']]
+    
+    if not late_tasks:
+        return "✅ *No late tasks!* Everything is on schedule. Great work team! 🎉"
+    
+    response = "⚠️ *Overdue Tasks - Needs Attention:*\n\n"
+    
+    # Sort by how late they are (most late first)
+    late_tasks.sort(key=lambda x: x['days_late'], reverse=True)
+    
+    for i, task in enumerate(late_tasks[:10], 1):
+        owners = ', '.join(task['owners']) if task['owners'] else 'Unassigned'
+        
+        response += f"*{i}. {task['name']}*\n"
+        response += f"   👤 {owners} • 📍 {task['department']}\n"
+        response += f"   📅 Due: {task['due_date']} ({task['days_late']} day{'s' if task['days_late'] != 1 else ''} late)\n"
+        
+        if task['priority'] == 'High':
+            response += "   🚨 High Priority\n"
+        
+        if task['blocker'] not in ['None', 'Not set']:
+            response += f"   🚧 Blocker: {task['blocker']}\n"
+        
+        if task['next_step'] and task['next_step'] not in ['', 'Not specified']:
+            response += f"   👉 Next: {task['next_step']}\n"
+        
+        response += "\n"
+    
+    if len(late_tasks) > 10:
+        response += f"... and {len(late_tasks) - 10} more overdue tasks\n"
+    
+    return response
+
+# NEW: Person's weekly tasks
+def generate_person_weekly_tasks(tasks: List[Dict], person: str) -> str:
+    """Generate weekly tasks for a specific person"""
+    today = datetime.now().date()
+    start_date = today - timedelta(days=today.weekday())
+    end_date = start_date + timedelta(days=6)
+    
+    person_tasks = [t for t in tasks if any(person.lower() in owner.lower() for owner in t['owners'])]
+    weekly_tasks = []
+    
+    for task in person_tasks:
+        if task['due_date'] != 'No date' and not task['is_completed']:
+            try:
+                due_date = datetime.strptime(task['due_date'], '%Y-%m-%d').date()
+                if start_date <= due_date <= end_date:
+                    weekly_tasks.append(task)
+            except ValueError:
+                continue
+    
+    response = f"👤 *{person}'s Week Ahead ({start_date} to {end_date}):*\n\n"
+    
+    if not weekly_tasks:
+        response += f"No specific tasks due this week. {person} may be working on ongoing projects."
+        return response
+    
+    response += f"*{len(weekly_tasks)} tasks due this week:*\n\n"
+    
+    for i, task in enumerate(weekly_tasks, 1):
+        response += f"*{i}. {task['name']}*\n"
+        response += f"   📍 {task['department']} • 📅 Due: {task['due_date']}\n"
+        response += f"   🎯 Priority: {task['priority']}\n"
+        
+        if task['next_step'] and task['next_step'] not in ['', 'Not specified']:
+            response += f"   👉 Next: {task['next_step']}\n"
+        
+        response += "\n"
+    
+    return response
+
+# NEW: Department's weekly tasks
+def generate_department_weekly_tasks(tasks: List[Dict], department: str) -> str:
+    """Generate weekly tasks for a specific department"""
+    today = datetime.now().date()
+    start_date = today - timedelta(days=today.weekday())
+    end_date = start_date + timedelta(days=6)
+    
+    dept_tasks = [t for t in tasks if t['department'] == department]
+    weekly_tasks = []
+    
+    for task in dept_tasks:
+        if task['due_date'] != 'No date' and not task['is_completed']:
+            try:
+                due_date = datetime.strptime(task['due_date'], '%Y-%m-%d').date()
+                if start_date <= due_date <= end_date:
+                    weekly_tasks.append(task)
+            except ValueError:
+                continue
+    
+    response = f"📊 *{department} Department - This Week ({start_date} to {end_date}):*\n\n"
+    
+    if not weekly_tasks:
+        response += f"No specific tasks due this week. The {department} team may be working on ongoing projects."
+        return response
+    
+    response += f"*{len(weekly_tasks)} tasks due this week:*\n\n"
+    
+    # Group by priority
+    high_priority = [t for t in weekly_tasks if t['priority'] == 'High']
+    other_priority = [t for t in weekly_tasks if t['priority'] != 'High']
+    
+    if high_priority:
+        response += "🚨 *High Priority:*\n"
+        for task in high_priority:
+            owners = ', '.join(task['owners']) if task['owners'] else 'Team'
+            response += f"• {task['name']} ({owners}) - Due: {task['due_date']}\n"
+        response += "\n"
+    
+    if other_priority:
+        response += "📋 *Other Tasks:*\n"
+        for task in other_priority[:8]:
+            owners = ', '.join(task['owners']) if task['owners'] else 'Team'
+            response += f"• {task['name']} ({owners}) - Due: {task['due_date']}\n"
+    
+    return response
 
 @app.post("/slack/command")
 async def slack_command(request: Request, background_tasks: BackgroundTasks):
