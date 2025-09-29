@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Task Intel Bot")
 
-# Initialize cache
-cache = cachetools.TTLCache(maxsize=100, ttl=30)
+# Initialize cache with longer TTL
+cache = cachetools.TTLCache(maxsize=100, ttl=60)
 
 # Database configuration
 DATABASES = {
@@ -48,14 +48,14 @@ TEAM_MEMBERS = {
     'brazil': 'Brazil'
 }
 
-# Initialize Notion client
+# Initialize Notion client with longer timeout
 notion = None
 try:
     from notion_client import Client
     notion_token = os.getenv('NOTION_TOKEN')
     if notion_token:
-        notion = Client(auth=notion_token, timeout_ms=10000)
-        logger.info("Notion client initialized")
+        notion = Client(auth=notion_token, timeout_ms=30000)  # 30 seconds timeout
+        logger.info("Notion client initialized with 30s timeout")
 except Exception as e:
     logger.error(f"Notion init failed: {e}")
 
@@ -72,95 +72,127 @@ async def health_check():
     }
 
 async def understand_query(query: str) -> Dict:
-    """Understand natural language queries with conversation support"""
+    """Understand natural language queries with improved matching"""
     if not query:
-        return {"intent": "company_update", "tone": "friendly"}
+        return {"intent": "company_update", "tone": "friendly", "confidence": 1.0}
     
-    query_lower = query.lower()
+    query_lower = query.lower().strip()
     
     # Greetings and conversational phrases
-    if any(word in query_lower for word in ['hi', 'hello', 'hey', 'howdy']):
-        return {"intent": "greeting", "tone": "warm"}
+    greeting_words = ['hi', 'hello', 'hey', 'howdy', 'hiya', 'yo ']
+    if any(word in query_lower for word in greeting_words):
+        return {"intent": "greeting", "tone": "warm", "confidence": 1.0}
     
-    if any(word in query_lower for word in ['thanks', 'thank you', 'appreciate']):
-        return {"intent": "thanks", "tone": "appreciative"}
+    if any(word in query_lower for word in ['thanks', 'thank you', 'appreciate', 'thx']):
+        return {"intent": "thanks", "tone": "appreciative", "confidence": 1.0}
     
-    if any(word in query_lower for word in ['next steps', 'what next', 'what should', 'recommend']):
-        return {"intent": "next_steps", "tone": "helpful"}
+    # Next steps with variations
+    next_steps_words = ['next steps', 'what next', 'what should', 'recommend', 'suggest', 'advice']
+    if any(word in query_lower for word in next_steps_words):
+        return {"intent": "next_steps", "tone": "helpful", "confidence": 0.9}
     
-    # NEW: Deadline and weekly tracking intents
-    if any(word in query_lower for word in ['due this week', 'this week', 'weekly tasks', 'week plan']):
-        return {"intent": "this_week", "tone": "proactive"}
+    # Deadline and weekly tracking with variations
+    this_week_words = ['due this week', 'this week', 'weekly tasks', 'week plan', 'current week', 'upcoming week']
+    if any(word in query_lower for word in this_week_words):
+        return {"intent": "this_week", "tone": "proactive", "confidence": 0.9}
     
-    if any(word in query_lower for word in ['due next week', 'next week', 'upcoming week']):
-        return {"intent": "next_week", "tone": "forward_looking"}
+    next_week_words = ['due next week', 'next week', 'following week', 'upcoming week']
+    if any(word in query_lower for word in next_week_words):
+        return {"intent": "next_week", "tone": "forward_looking", "confidence": 0.9}
     
-    if any(word in query_lower for word in ['late', 'overdue', 'past due', 'missed deadline', 'deadlines passed']):
-        return {"intent": "late_tasks", "tone": "urgent"}
+    # Late tasks with variations
+    late_words = ['late', 'overdue', 'past due', 'missed deadline', 'deadlines passed', 'behind schedule']
+    if any(word in query_lower for word in late_words):
+        return {"intent": "late_tasks", "tone": "urgent", "confidence": 0.9}
     
-    # Check for team members with weekly context
+    # Check for team members with fuzzy matching
     for person_key, person_name in TEAM_MEMBERS.items():
-        if person_key in query_lower:
-            if 'week' in query_lower or 'finish' in query_lower:
-                return {"intent": "person_weekly", "person": person_name, "tone": "supportive"}
-            return {"intent": "person_update", "person": person_name, "tone": "supportive"}
+        # Direct match or partial match
+        if (person_key in query_lower or 
+            person_name.lower() in query_lower or
+            any(word in query_lower for word in [person_key, person_name.lower()])):
+            
+            # Check for weekly context
+            week_context = any(word in query_lower for word in ['week', 'finish', 'complete', 'due', 'deadline'])
+            if week_context:
+                return {"intent": "person_weekly", "person": person_name, "tone": "supportive", "confidence": 0.8}
+            else:
+                return {"intent": "person_update", "person": person_name, "tone": "supportive", "confidence": 0.8}
     
-    # Check for departments with weekly context
-    if any(word in query_lower for word in ['tech', 'engineering']):
-        if 'week' in query_lower or 'finish' in query_lower:
-            return {"intent": "department_weekly", "department": "Tech", "tone": "informative"}
-        return {"intent": "department_update", "department": "Tech", "tone": "informative"}
-    elif any(word in query_lower for word in ['commercial', 'sales', 'business']):
-        if 'week' in query_lower or 'finish' in query_lower:
-            return {"intent": "department_weekly", "department": "Commercial", "tone": "informative"}
-        return {"intent": "department_update", "department": "Commercial", "tone": "informative"}
-    elif any(word in query_lower for word in ['operations', 'ops']):
-        if 'week' in query_lower or 'finish' in query_lower:
-            return {"intent": "department_weekly", "department": "Operations", "tone": "informative"}
-        return {"intent": "department_update", "department": "Operations", "tone": "informative"}
-    elif any(word in query_lower for word in ['finance', 'financial']):
-        if 'week' in query_lower or 'finish' in query_lower:
-            return {"intent": "department_weekly", "department": "Finance", "tone": "informative"}
-        return {"intent": "department_update", "department": "Finance", "tone": "informative"}
+    # Check for departments with variations
+    dept_patterns = {
+        'Tech': ['tech', 'engineering', 'dev', 'developers', 'technical'],
+        'Commercial': ['commercial', 'sales', 'business', 'revenue', 'clients'],
+        'Operations': ['operations', 'ops', 'operational', 'process'],
+        'Finance': ['finance', 'financial', 'money', 'budget', 'revenue']
+    }
     
-    # Check for other intents
-    if any(word in query_lower for word in ['brief', 'overview', 'company', 'status', 'update']):
-        return {"intent": "company_update", "tone": "confident"}
+    for dept, patterns in dept_patterns.items():
+        if any(pattern in query_lower for pattern in patterns):
+            week_context = any(word in query_lower for word in ['week', 'finish', 'complete', 'due'])
+            if week_context:
+                return {"intent": "department_weekly", "department": dept, "tone": "informative", "confidence": 0.8}
+            else:
+                return {"intent": "department_update", "department": dept, "tone": "informative", "confidence": 0.8}
     
-    if any(word in query_lower for word in ['block', 'stuck', 'issue', 'problem', 'blocker']):
-        return {"intent": "blockers_update", "tone": "concerned"}
+    # Check for other intents with variations
+    company_words = ['brief', 'overview', 'company', 'status', 'update', 'how are we', 'how we doing']
+    if any(word in query_lower for word in company_words):
+        return {"intent": "company_update", "tone": "confident", "confidence": 0.8}
     
-    if any(word in query_lower for word in ['priority', 'important', 'critical', 'urgent']):
-        return {"intent": "priorities_update", "tone": "focused"}
+    blocker_words = ['block', 'stuck', 'issue', 'problem', 'blocker', 'impediment', 'obstacle']
+    if any(word in query_lower for word in blocker_words):
+        return {"intent": "blockers_update", "tone": "concerned", "confidence": 0.8}
     
-    # Default to helpful response
-    return {"intent": "help", "tone": "friendly"}
+    priority_words = ['priority', 'important', 'critical', 'urgent', 'high priority', 'p0', 'p1']
+    if any(word in query_lower for word in priority_words):
+        return {"intent": "priorities_update", "tone": "focused", "confidence": 0.8}
+    
+    # Help intent for unclear queries
+    help_words = ['help', 'what can you do', 'how to use', 'commands', 'options']
+    if any(word in query_lower for word in help_words):
+        return {"intent": "help", "tone": "friendly", "confidence": 1.0}
+    
+    # Default to company update with lower confidence
+    return {"intent": "company_update", "tone": "friendly", "confidence": 0.5}
 
 async def get_all_tasks() -> List[Dict]:
-    """Get all tasks with caching"""
+    """Get all tasks with caching and timeout protection"""
     cache_key = "all_tasks"
     if cache_key in cache:
         return cache[cache_key]
     
     tasks = []
     if not notion:
+        logger.error("Notion client not initialized")
         return tasks
     
-    # Fetch all databases
+    # Fetch all databases with timeout protection
     for dept, db_id in DATABASES.items():
-        if db_id:
-            try:
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None, lambda: notion.databases.query(database_id=db_id, page_size=100)
-                )
-                
-                for page in result.get('results', []):
-                    task = parse_task(page, dept)
-                    if task:
-                        tasks.append(task)
-                        
-            except Exception as e:
-                logger.error(f"Error fetching {dept}: {e}")
+        if not db_id:
+            continue
+            
+        try:
+            # Add timeout protection for each database query
+            result = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None, 
+                    lambda: notion.databases.query(database_id=db_id, page_size=100)
+                ),
+                timeout=25.0  # 25 second timeout per database
+            )
+            
+            for page in result.get('results', []):
+                task = parse_task(page, dept)
+                if task:
+                    tasks.append(task)
+                    
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout fetching {dept} database - skipping")
+            continue
+        except Exception as e:
+            logger.error(f"Error fetching {dept}: {e}")
+            continue
     
     cache[cache_key] = tasks
     return tasks
@@ -246,51 +278,74 @@ def get_property(props, field_name: str, field_type: str) -> str:
 def generate_response(tasks: List[Dict], analysis: Dict) -> str:
     """Generate conversational response with next steps"""
     intent = analysis['intent']
-    tone = analysis.get('tone', 'friendly')
     
     if intent == 'greeting':
-        return f"👋 Hey there! I'm your Task Intel Bot. I can tell you what everyone's working on, deadlines, weekly plans, and more. What would you like to know?"
-    
+        return f"""👋 Hey there! I'm your Task Intel Bot. 
+
+I can help you with:
+• People updates: "What's Omar working on?"
+• Weekly plans: "What's due this week?" 
+• Deadlines: "What tasks are late?"
+• Team status: "Tech department update"
+• Priorities: "High priority items"
+• Blockers: "What's stuck?"
+
+Just ask naturally! I understand conversational language."""
+
     if intent == 'thanks':
         return "🙏 You're welcome! Happy to help. What else can I update you on?"
     
     if intent == 'help':
         return """🤖 *How I can help you:*
 
-• *People:* "What is Omar working on?" or "What should Derrick finish this week?"
-• *Deadlines:* "What tasks are late?" or "What's due this week?"
-• *Weekly Plans:* "What should Operations finish this week?" or "Next week's tasks"
-• *Company:* "Company update" or "How are we doing?"
-• *Blockers:* "What's blocked?" or "Any issues?"
-• *Priorities:* "High priority items" or "What's urgent?"
-• *Departments:* "Tech status" or "Commercial update"
+*People & Work:*
+• "What is [person] working on?"
+• "What should [person] finish this week?"
+• "Show me [person]'s tasks"
 
-Just ask naturally! I understand conversational language."""
+*Time & Deadlines:*
+• "What's due this week?"
+• "What's due next week?" 
+• "What tasks are late?"
+• "Show me overdue tasks"
 
-    # NEW: This week's tasks
+*Teams & Departments:*
+• "Tech status" or "Engineering update"
+• "Commercial team update" 
+• "Operations overview"
+• "Finance department"
+
+*Focus Areas:*
+• "High priority items"
+• "What's urgent?"
+• "Current blockers"
+• "What's stuck?"
+• "Next steps"
+
+Just ask naturally! I understand many variations."""
+
+    # Weekly tasks
     if intent == 'this_week':
         return generate_weekly_tasks(tasks, "this_week")
     
-    # NEW: Next week's tasks
     if intent == 'next_week':
         return generate_weekly_tasks(tasks, "next_week")
     
-    # NEW: Late tasks
+    # Late tasks
     if intent == 'late_tasks':
         return generate_late_tasks(tasks)
     
-    # NEW: Person's weekly tasks
+    # Person's weekly tasks
     if intent == 'person_weekly':
         person = analysis['person']
         return generate_person_weekly_tasks(tasks, person)
     
-    # NEW: Department's weekly tasks
+    # Department's weekly tasks
     if intent == 'department_weekly':
         dept = analysis.get('department', 'All')
         return generate_department_weekly_tasks(tasks, dept)
 
     if intent == 'next_steps':
-        # Show tasks with meaningful next steps
         tasks_with_next_steps = [t for t in tasks if t['next_step'] and t['next_step'] not in ['', 'Not specified']]
         
         if not tasks_with_next_steps:
@@ -315,7 +370,6 @@ Just ask naturally! I understand conversational language."""
         if not person_tasks:
             return f"👤 *{person}* doesn't have any tasks assigned right now. They might be between projects or focusing on ad-hoc work."
         
-        # Show tasks with next steps prominently
         tasks_with_next_steps = [t for t in person_tasks if t['next_step'] and t['next_step'] not in ['', 'Not specified']]
         in_progress = [t for t in person_tasks if t['status'] == 'In progress']
         
@@ -331,7 +385,6 @@ Just ask naturally! I understand conversational language."""
                     response += f" 🚧 {task['blocker']} blocker"
                 response += "\n"
                 
-                # Show next step if available
                 if task['next_step'] and task['next_step'] not in ['', 'Not specified']:
                     response += f"  👉 *Next:* {task['next_step']}\n"
                 response += "\n"
@@ -359,7 +412,6 @@ Just ask naturally! I understand conversational language."""
         response += f"• {high_priority} high priority items\n"
         response += f"• {late_tasks} overdue tasks\n\n"
         
-        # Show critical blockers
         major_blockers = [t for t in tasks if t['blocker'] == 'Major']
         if major_blockers:
             response += "🚨 *Critical items needing attention:*\n"
@@ -367,7 +419,6 @@ Just ask naturally! I understand conversational language."""
                 response += f"• {task['name']} ({task['department']})\n"
             response += "\n"
         
-        # Show key next steps
         important_next_steps = [t for t in tasks if t['next_step'] and t['priority'] == 'High']
         if important_next_steps:
             response += "🎯 *Key next steps this week:*\n"
@@ -440,7 +491,6 @@ Just ask naturally! I understand conversational language."""
         for status, count in status_counts.items():
             response += f"• {status}: {count} tasks\n"
         
-        # Show key next steps for the department
         dept_next_steps = [t for t in dept_tasks if t['next_step'] and t['next_step'] not in ['', 'Not specified']]
         if dept_next_steps:
             response += f"\n*Key next steps for {dept}:*\n"
@@ -449,7 +499,6 @@ Just ask naturally! I understand conversational language."""
         
         return response
 
-# NEW: Weekly tasks generator
 def generate_weekly_tasks(tasks: List[Dict], week_type: str) -> str:
     """Generate weekly tasks overview"""
     today = datetime.now().date()
@@ -478,7 +527,6 @@ def generate_weekly_tasks(tasks: List[Dict], week_type: str) -> str:
     
     response = f"📅 *{title}'s Deadlines ({start_date} to {end_date}):*\n\n"
     
-    # Group by department
     dept_groups = {}
     for task in weekly_tasks:
         dept = task['department']
@@ -497,7 +545,6 @@ def generate_weekly_tasks(tasks: List[Dict], week_type: str) -> str:
     
     return response
 
-# NEW: Late tasks generator
 def generate_late_tasks(tasks: List[Dict]) -> str:
     """Generate late tasks report"""
     late_tasks = [t for t in tasks if t['is_late'] and not t['is_completed']]
@@ -507,7 +554,6 @@ def generate_late_tasks(tasks: List[Dict]) -> str:
     
     response = "⚠️ *Overdue Tasks - Needs Attention:*\n\n"
     
-    # Sort by how late they are (most late first)
     late_tasks.sort(key=lambda x: x['days_late'], reverse=True)
     
     for i, task in enumerate(late_tasks[:10], 1):
@@ -533,7 +579,6 @@ def generate_late_tasks(tasks: List[Dict]) -> str:
     
     return response
 
-# NEW: Person's weekly tasks
 def generate_person_weekly_tasks(tasks: List[Dict], person: str) -> str:
     """Generate weekly tasks for a specific person"""
     today = datetime.now().date()
@@ -572,7 +617,6 @@ def generate_person_weekly_tasks(tasks: List[Dict], person: str) -> str:
     
     return response
 
-# NEW: Department's weekly tasks
 def generate_department_weekly_tasks(tasks: List[Dict], department: str) -> str:
     """Generate weekly tasks for a specific department"""
     today = datetime.now().date()
@@ -599,7 +643,6 @@ def generate_department_weekly_tasks(tasks: List[Dict], department: str) -> str:
     
     response += f"*{len(weekly_tasks)} tasks due this week:*\n\n"
     
-    # Group by priority
     high_priority = [t for t in weekly_tasks if t['priority'] == 'High']
     other_priority = [t for t in weekly_tasks if t['priority'] != 'High']
     
@@ -620,16 +663,16 @@ def generate_department_weekly_tasks(tasks: List[Dict], department: str) -> str:
 
 @app.post("/slack/command")
 async def slack_command(request: Request, background_tasks: BackgroundTasks):
-    """Handle Slack commands with conversational responses"""
+    """Handle Slack commands with better timeout handling"""
     try:
         form_data = await request.form()
         query = form_data.get("text", "").strip()
         response_url = form_data.get("response_url")
         
-        # Immediate response
+        # Immediate response with helpful message for cold starts
         immediate_response = {
             "response_type": "ephemeral",
-            "text": "💭 Let me check on that for you..."
+            "text": "💭 Gathering your task info... (This might take 20-30 seconds if I was sleeping 😴)"
         }
         
         # Process in background
@@ -642,7 +685,7 @@ async def slack_command(request: Request, background_tasks: BackgroundTasks):
         logger.error(f"Slack command error: {e}")
         return JSONResponse(content={
             "response_type": "ephemeral", 
-            "text": "❌ Hmm, I'm having trouble understanding. Try asking about a team member or company status."
+            "text": "❌ I'm having trouble right now. Try again in 30 seconds."
         })
 
 async def process_query(query: str, response_url: str):
@@ -652,7 +695,7 @@ async def process_query(query: str, response_url: str):
         tasks = await get_all_tasks()
         
         if not tasks:
-            response = "📭 I don't see any tasks in the system right now. The team might be between projects."
+            response = "📭 I'm having trouble connecting to the task database right now. This often happens when I'm waking up. Try again in 30 seconds!"
         else:
             response = generate_response(tasks, analysis)
         
