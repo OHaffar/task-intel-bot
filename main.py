@@ -48,6 +48,10 @@ TEAM_MEMBERS = {
     'brazil': 'Brazil'
 }
 
+# === ADD CONVERSATION CONTEXT ===
+LAST_QUERY_CONTEXT = {}
+# === END ADDITION ===
+
 # Initialize Notion client with longer timeout
 notion = None
 try:
@@ -71,12 +75,36 @@ async def health_check():
         "team_members": len(TEAM_MEMBERS)
     }
 
-async def understand_query(query: str) -> Dict:
-    """Understand natural language queries with improved matching"""
+async def understand_query(query: str, user_id: str = None) -> Dict:  # ← ADDED user_id parameter
+    """Understand natural language queries with conversation support"""
     if not query:
         return {"intent": "company_update", "tone": "friendly", "confidence": 1.0}
     
     query_lower = query.lower().strip()
+    
+    # === ADD CONVERSATION FLOW DETECTION ===
+    follow_up_commands = {
+        'pipeline': 'person_pipeline',
+        'impact': 'person_impact', 
+        'all tasks': 'person_all_tasks',
+        'blockers': 'person_blockers',
+        'all': 'person_all_tasks',
+        'upcoming': 'person_pipeline',
+        'what\'s next': 'person_pipeline',
+        'next': 'person_pipeline'
+    }
+    
+    # Check for follow-up commands if we have context
+    if user_id and user_id in LAST_QUERY_CONTEXT:
+        for cmd, intent in follow_up_commands.items():
+            if cmd in query_lower:
+                return {
+                    "intent": intent,
+                    "person": LAST_QUERY_CONTEXT[user_id]['person'],
+                    "tone": "helpful",
+                    "confidence": 0.9
+                }
+    # === END CONVERSATION FLOW ADDITION ===
     
     # Greetings and conversational phrases
     greeting_words = ['hi', 'hello', 'hey', 'howdy', 'hiya', 'yo ']
@@ -111,6 +139,14 @@ async def understand_query(query: str) -> Dict:
         if (person_key in query_lower or 
             person_name.lower() in query_lower or
             any(word in query_lower for word in [person_key, person_name.lower()])):
+            
+            # === ADD CONTEXT STORAGE ===
+            if user_id:
+                LAST_QUERY_CONTEXT[user_id] = {
+                    'person': person_name,
+                    'timestamp': time.time()
+                }
+            # === END CONTEXT STORAGE ===
             
             # Check for weekly context
             week_context = any(word in query_lower for word in ['week', 'finish', 'complete', 'due', 'deadline'])
@@ -324,6 +360,24 @@ Just ask naturally! I understand conversational language."""
 
 Just ask naturally! I understand many variations."""
 
+    # === ADD NEW CONVERSATION INTENTS ===
+    if intent == 'person_pipeline':
+        person = analysis['person']
+        return generate_person_pipeline(tasks, person)
+    
+    if intent == 'person_impact':
+        person = analysis['person']
+        return generate_person_impact(tasks, person)
+    
+    if intent == 'person_all_tasks':
+        person = analysis['person']
+        return generate_person_all_tasks(tasks, person)
+    
+    if intent == 'person_blockers':
+        person = analysis['person']
+        return generate_person_blockers(tasks, person)
+    # === END NEW INTENTS ===
+
     # Weekly tasks
     if intent == 'this_week':
         return generate_weekly_tasks(tasks, "this_week")
@@ -370,32 +424,48 @@ Just ask naturally! I understand many variations."""
         if not person_tasks:
             return f"👤 *{person}* doesn't have any tasks assigned right now. They might be between projects or focusing on ad-hoc work."
         
-        tasks_with_next_steps = [t for t in person_tasks if t['next_step'] and t['next_step'] not in ['', 'Not specified']]
+        # Comprehensive analysis
         in_progress = [t for t in person_tasks if t['status'] == 'In progress']
+        not_started = [t for t in person_tasks if t['status'] == 'Not started']
+        high_priority = len([t for t in person_tasks if t['priority'] == 'High'])
+        late_tasks = len([t for t in person_tasks if t['is_late'] and not t['is_completed']])
+        tasks_with_impact = [t for t in person_tasks if t.get('impact') and t['impact'] not in ['', 'Not specified']]
         
-        response = f"👤 *Here's what {person} is working on:*\n\n"
+        response = f"*Here's what {person} is working on:*\n\n"
         
+        # Show only current work
         if in_progress:
-            response += f"*Currently Working On ({len(in_progress)}):*\n"
-            for task in in_progress[:4]:
-                response += f"• *{task['name']}*"
+            response += f"🚀 *Currently Working On ({len(in_progress)}):*\n"
+            for task in in_progress:
+                response += f"• {task['name']}"
                 if task['due_date'] != 'No date':
                     response += f" (due {task['due_date']})"
-                if task['blocker'] not in ['None', 'Not set']:
-                    response += f" 🚧 {task['blocker']} blocker"
                 response += "\n"
                 
                 if task['next_step'] and task['next_step'] not in ['', 'Not specified']:
-                    response += f"  👉 *Next:* {task['next_step']}\n"
+                    response += f"  👉 Next: {task['next_step']}\n"
                 response += "\n"
         
-        if tasks_with_next_steps:
-            response += f"*Key Next Steps ({len(tasks_with_next_steps)}):*\n"
-            for task in tasks_with_next_steps[:3]:
-                response += f"• {task['next_step']}\n"
-            response += "\n"
+        # Summary
+        response += f"📊 *Summary:* {len(person_tasks)} total tasks • {high_priority} high priority"
+        if late_tasks > 0:
+            response += f" • {late_tasks} overdue"
+        response += "\n\n"
         
-        response += f"*Summary:* {len(person_tasks)} total tasks • {len([t for t in person_tasks if t['priority'] == 'High'])} high priority"
+        # Smart follow-ups
+        follow_ups = []
+        if not_started:
+            follow_ups.append("'pipeline' to see upcoming tasks")
+        if tasks_with_impact:
+            follow_ups.append("'impact' to see the impact of the tasks listed")
+        if len(person_tasks) > len(in_progress):
+            follow_ups.append("'all tasks' for complete breakdown")
+        
+        if follow_ups:
+            response += "💡 *Want more details?* Reply with:\n"
+            for option in follow_ups:
+                response += f"• {option}\n"
+        
         return response
     
     elif intent == 'company_update':
@@ -661,13 +731,85 @@ def generate_department_weekly_tasks(tasks: List[Dict], department: str) -> str:
     
     return response
 
+# === ADD NEW CONVERSATION FUNCTIONS ===
+def generate_person_pipeline(tasks: List[Dict], person: str) -> str:
+    person_tasks = [t for t in tasks if any(person.lower() in owner.lower() for owner in t['owners'])]
+    not_started = [t for t in person_tasks if t['status'] == 'Not started']
+    
+    response = f"📋 *{person}'s Pipeline - Upcoming Tasks:*\n\n"
+    
+    if not_started:
+        for task in not_started:
+            response += f"• {task['name']}"
+            if task['due_date'] != 'No date':
+                response += f" (due {task['due_date']})"
+            if task['priority'] == 'High':
+                response += " 🚨 High Priority"
+            response += "\n"
+    else:
+        response += f"✨ {person} has no upcoming tasks. Everything is in progress or completed!\n"
+    
+    return response
+
+def generate_person_impact(tasks: List[Dict], person: str) -> str:
+    person_tasks = [t for t in tasks if any(person.lower() in owner.lower() for owner in t['owners'])]
+    tasks_with_impact = [t for t in person_tasks if t.get('impact') and t['impact'] not in ['', 'Not specified']]
+    
+    response = f"📈 *Business Impact - {person}'s Tasks:*\n\n"
+    
+    if tasks_with_impact:
+        for task in tasks_with_impact:
+            response += f"• *{task['name']}*\n"
+            response += f"  🎯 Impact: {task['impact']}\n\n"
+    else:
+        response += f"📝 No impact descriptions available for {person}'s tasks yet.\n"
+    
+    return response
+
+def generate_person_all_tasks(tasks: List[Dict], person: str) -> str:
+    person_tasks = [t for t in tasks if any(person.lower() in owner.lower() for owner in t['owners'])]
+    
+    response = f"📂 *All Tasks - {person}:*\n\n"
+    
+    status_groups = {}
+    for task in person_tasks:
+        status = task['status']
+        if status not in status_groups:
+            status_groups[status] = []
+        status_groups[status].append(task)
+    
+    for status, status_tasks in status_groups.items():
+        response += f"*{status} ({len(status_tasks)}):*\n"
+        for task in status_tasks:
+            response += f"• {task['name']}\n"
+        response += "\n"
+    
+    return response
+
+def generate_person_blockers(tasks: List[Dict], person: str) -> str:
+    person_tasks = [t for t in tasks if any(person.lower() in owner.lower() for owner in t['owners'])]
+    blocked_tasks = [t for t in person_tasks if t['blocker'] not in ['None', 'Not set']]
+    
+    response = f"🚧 *Blockers - {person}:*\n\n"
+    
+    if blocked_tasks:
+        for task in blocked_tasks:
+            response += f"• *{task['name']}*\n"
+            response += f"  🚧 {task['blocker']}\n\n"
+    else:
+        response += f"✅ No blockers for {person}! Everything is moving smoothly.\n"
+    
+    return response
+# === END NEW FUNCTIONS ===
+
 @app.post("/slack/command")
 async def slack_command(request: Request, background_tasks: BackgroundTasks):
-    """Handle Slack commands with better timeout handling"""
+    """Handle Slack commands with conversation context"""
     try:
         form_data = await request.form()
         query = form_data.get("text", "").strip()
         response_url = form_data.get("response_url")
+        user_id = form_data.get("user_id")  # ← ADDED user_id
         
         # Immediate response with helpful message for cold starts
         immediate_response = {
@@ -675,9 +817,9 @@ async def slack_command(request: Request, background_tasks: BackgroundTasks):
             "text": "💭 Gathering your task info... (This might take 20-30 seconds if I was sleeping 😴)"
         }
         
-        # Process in background
+        # Process in background with user context
         if response_url:
-            background_tasks.add_task(process_query, query, response_url)
+            background_tasks.add_task(process_query_with_context, query, response_url, user_id)  # ← UPDATED
         
         return JSONResponse(content=immediate_response)
         
@@ -688,10 +830,11 @@ async def slack_command(request: Request, background_tasks: BackgroundTasks):
             "text": "❌ I'm having trouble right now. Try again in 30 seconds."
         })
 
-async def process_query(query: str, response_url: str):
-    """Process query in background"""
+# === ADD NEW PROCESSING FUNCTION ===
+async def process_query_with_context(query: str, response_url: str, user_id: str):
+    """Process query in background with conversation context"""
     try:
-        analysis = await understand_query(query)
+        analysis = await understand_query(query, user_id)  # ← PASS user_id
         tasks = await get_all_tasks()
         
         if not tasks:
@@ -706,6 +849,11 @@ async def process_query(query: str, response_url: str):
         logger.error(f"Processing error: {e}")
         error_msg = "❌ Sorry, I'm having trouble pulling the latest updates. Try again in a moment."
         await send_slack_response(response_url, {"response_type": "in_channel", "text": error_msg})
+# === END NEW FUNCTION ===
+
+async def process_query(query: str, response_url: str):
+    """Legacy function - keep for compatibility"""
+    await process_query_with_context(query, response_url, "default_user")
 
 async def send_slack_response(response_url: str, payload: Dict):
     """Send response to Slack"""
