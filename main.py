@@ -74,8 +74,23 @@ async def health_check():
         "team_members": len(TEAM_MEMBERS)
     }
 
+def cleanup_old_contexts():
+    """Remove conversation contexts older than 1 hour"""
+    current_time = time.time()
+    expired_users = []
+    
+    for user_id, context in LAST_QUERY_CONTEXT.items():
+        if current_time - context['timestamp'] > 3600:  # 1 hour
+            expired_users.append(user_id)
+    
+    for user_id in expired_users:
+        del LAST_QUERY_CONTEXT[user_id]
+
 async def understand_query(query: str, user_id: str = None) -> Dict:
     """Understand natural language queries with conversation support"""
+    # Clean up old contexts first
+    cleanup_old_contexts()
+    
     if not query:
         return {"intent": "company_update", "tone": "friendly", "confidence": 1.0}
     
@@ -86,17 +101,32 @@ async def understand_query(query: str, user_id: str = None) -> Dict:
         'pipeline': 'person_pipeline',
         'impact': 'person_impact', 
         'all tasks': 'person_all_tasks',
-        'blockers': 'person_blockers',
         'all': 'person_all_tasks',
+        'blockers': 'person_blockers',
+        'blocker': 'person_blockers',
         'upcoming': 'person_pipeline',
         'what\'s next': 'person_pipeline',
-        'next': 'person_pipeline'
+        'next': 'person_pipeline',
+        'tasks': 'person_all_tasks',
+        'show tasks': 'person_all_tasks',
+        'list tasks': 'person_all_tasks'
     }
     
     # Check for follow-up commands if we have context
     if user_id and user_id in LAST_QUERY_CONTEXT:
+        # Check for exact matches first
         for cmd, intent in follow_up_commands.items():
-            if cmd in query_lower:
+            if cmd == query_lower:  # Exact match
+                return {
+                    "intent": intent,
+                    "person": LAST_QUERY_CONTEXT[user_id]['person'],
+                    "tone": "helpful", 
+                    "confidence": 0.95
+                }
+        
+        # Then check for partial matches
+        for cmd, intent in follow_up_commands.items():
+            if cmd in query_lower and len(query_lower) < 20:  # Short queries likely follow-ups
                 return {
                     "intent": intent,
                     "person": LAST_QUERY_CONTEXT[user_id]['person'],
@@ -785,11 +815,16 @@ def generate_person_pipeline(tasks: List[Dict], person: str) -> str:
     
     if not_started:
         for task in not_started:
-            response += f"• {task['name']}"
+            response += f"• **{task['name']}**\n"
             if task['due_date'] != 'No date':
-                response += f" (due {task['due_date']})"
+                response += f"  📅 Due: {task['due_date']}"
+                if task['is_late']:
+                    response += f" ({task['days_late']} days overdue!)"
+                response += "\n"
             if task['priority'] == 'High':
-                response += " 🚨 High Priority"
+                response += f"  🚨 High Priority\n"
+            if task['next_step'] and task['next_step'] not in ['', 'Not specified']:
+                response += f"  👉 Next: {task['next_step']}\n"
             response += "\n"
     else:
         response += f"✨ {person} has no upcoming tasks. Everything is in progress or completed!\n"
@@ -804,7 +839,7 @@ def generate_person_impact(tasks: List[Dict], person: str) -> str:
     
     if tasks_with_impact:
         for task in tasks_with_impact:
-            response += f"• *{task['name']}*\n"
+            response += f"• **{task['name']}**\n"
             response += f"  🎯 Impact: {task['impact']}\n\n"
     else:
         response += f"📝 No impact descriptions available for {person}'s tasks yet.\n"
@@ -824,57 +859,49 @@ def generate_person_all_tasks(tasks: List[Dict], person: str) -> str:
     
     response = f"📊 *All Tasks - {person}:*\n\n"
     
-    # Current active work
+    # Current active work - SHOW THE ACTUAL TASKS
     if in_progress:
         response += f"🚀 *In Progress ({len(in_progress)}):*\n"
         for task in in_progress:
-            response += f"• {task['name']}"
+            response += f"• **{task['name']}**\n"
             if task['due_date'] != 'No date':
-                response += f" (due {task['due_date']})"
+                response += f"  📅 Due: {task['due_date']}"
+                if task['is_late']:
+                    response += f" ({task['days_late']} days overdue!)"
+                response += "\n"
             if task['priority'] == 'High':
-                response += " 🚨 High Priority"
+                response += f"  🚨 High Priority\n"
+            if task['next_step'] and task['next_step'] not in ['', 'Not specified']:
+                response += f"  👉 Next: {task['next_step']}\n"
+            if task['blocker'] not in ['None', 'Not set']:
+                response += f"  🚧 Blocker: {task['blocker']}\n"
             response += "\n"
-        response += "\n"
     
-    # Upcoming tasks
+    # Upcoming tasks - SHOW THE ACTUAL TASKS
     if not_started:
         response += f"📋 *Not Started ({len(not_started)}):*\n"
         
-        # Group by priority and due date status
-        overdue_tasks = [t for t in not_started if t['is_late']]
-        high_priority_tasks = [t for t in not_started if t['priority'] == 'High' and not t['is_late']]
-        other_tasks = [t for t in not_started if t['priority'] != 'High' and not t['is_late']]
-        
-        if overdue_tasks:
-            for task in overdue_tasks:
-                response += f"• {task['name']} - {task['days_late']} days overdue"
-                if task['priority'] == 'High':
-                    response += " 🚨"
-                response += f"\n  📅 Due: {task['due_date']}\n"
-        
-        if high_priority_tasks:
-            for task in high_priority_tasks:
-                response += f"• {task['name']}"
-                if task['due_date'] != 'No date':
-                    response += f" (due {task['due_date']})"
-                response += " 🚨 High Priority\n"
-        
-        if other_tasks:
-            for task in other_tasks:
-                response += f"• {task['name']}"
-                if task['due_date'] != 'No date':
-                    response += f" (due {task['due_date']})"
+        # Show all not started tasks with details
+        for task in not_started:
+            response += f"• **{task['name']}**\n"
+            if task['due_date'] != 'No date':
+                response += f"  📅 Due: {task['due_date']}"
+                if task['is_late']:
+                    response += f" ({task['days_late']} days overdue!)"
                 response += "\n"
-        
-        response += "\n"
+            if task['priority'] == 'High':
+                response += f"  🚨 High Priority\n"
+            if task['next_step'] and task['next_step'] not in ['', 'Not specified']:
+                response += f"  👉 Next: {task['next_step']}\n"
+            if task['blocker'] not in ['None', 'Not set']:
+                response += f"  🚧 Blocker: {task['blocker']}\n"
+            response += "\n"
     
-    # Completed work
+    # Completed work - SHOW THE ACTUAL TASKS
     if completed:
         response += f"✅ *Completed ({len(completed)}):*\n"
-        for task in completed[:5]:
+        for task in completed:
             response += f"• {task['name']}\n"
-        if len(completed) > 5:
-            response += f"... and {len(completed) - 5} more completed tasks\n"
         response += "\n"
     
     # Data summary
@@ -905,8 +932,18 @@ def generate_person_blockers(tasks: List[Dict], person: str) -> str:
     
     if blocked_tasks:
         for task in blocked_tasks:
-            response += f"• *{task['name']}*\n"
-            response += f"  🚧 {task['blocker']}\n\n"
+            response += f"• **{task['name']}**\n"
+            response += f"  🚧 **Blocker:** {task['blocker']}\n"
+            if task['due_date'] != 'No date':
+                response += f"  📅 Due: {task['due_date']}"
+                if task['is_late']:
+                    response += f" ({task['days_late']} days overdue!)"
+                response += "\n"
+            if task['priority'] == 'High':
+                response += f"  🚨 High Priority\n"
+            if task['next_step'] and task['next_step'] not in ['', 'Not specified']:
+                response += f"  👉 Next: {task['next_step']}\n"
+            response += "\n"
     else:
         response += f"✅ No blockers for {person}! Everything is moving smoothly.\n"
     
@@ -920,6 +957,8 @@ async def slack_command(request: Request, background_tasks: BackgroundTasks):
         query = form_data.get("text", "").strip()
         response_url = form_data.get("response_url")
         user_id = form_data.get("user_id")
+        
+        logger.info(f"User {user_id} asked: '{query}'")
         
         # Immediate response with helpful message for cold starts
         immediate_response = {
